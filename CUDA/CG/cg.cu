@@ -650,8 +650,8 @@ int main(int argc, char** argv){
 
 			/* compute residual norm explicitly:  ||r|| = ||x - A.z|| */
 			// gpu_kernel_eight();
-				// if (it == 1 && cgit == 1){
-				// 	cudaStreamBeginCapture(stream1, cudaStreamCaptureModeGlobal);
+				if (it == 1 && cgit == 1){
+					cudaStreamBeginCapture(stream1, cudaStreamCaptureModeGlobal);
 
 					gpu_kernel_eight<<<blocks_per_grid_on_kernel_eight,
 						threads_per_block_on_kernel_eight,
@@ -672,12 +672,12 @@ int main(int argc, char** argv){
 								sum_device,
 								global_data_device);
 
-				// 	cudaStreamEndCapture(stream1, &graph3);
-				// 	cudaGraphInstantiate(&graphExec3, graph3, NULL, NULL, 0);	
-				// }
+					cudaStreamEndCapture(stream1, &graph4);
+					cudaGraphInstantiate(&graphExec4, graph4, NULL, NULL, 0);	
+				}
 
-				// cudaGraphLaunch(graphExec3, stream1);
-				// cudaStreamSynchronize(stream1);	
+				cudaGraphLaunch(graphExec4, stream1);
+				cudaStreamSynchronize(stream1);	
 
 			global_data_reduce=0.0;
 			cudaMemcpy(global_data, global_data_device, size_reduce_memory_on_kernel_nine, cudaMemcpyDeviceToHost);
@@ -695,8 +695,28 @@ int main(int argc, char** argv){
 		 * --------------------------------------------------------------------
 		 */
 		// gpu_kernel_ten(&norm_temp1, &norm_temp2);
-		gpu_kernel_ten_1<<<blocks_per_grid_on_kernel_ten,threads_per_block_on_kernel_ten,size_shared_data_on_kernel_ten>>>(global_data_device,x_device,z_device);
-		gpu_kernel_ten_2<<<blocks_per_grid_on_kernel_ten,threads_per_block_on_kernel_ten,size_shared_data_on_kernel_ten>>>(global_data_two_device,x_device,z_device);
+				if (it == 1){
+					cudaStreamBeginCapture(stream1, cudaStreamCaptureModeGlobal);
+
+					gpu_kernel_ten_1<<<blocks_per_grid_on_kernel_ten,
+							threads_per_block_on_kernel_ten,
+							size_shared_data_on_kernel_ten, stream1>>>(
+								global_data_device,
+								x_device,
+								z_device);
+					gpu_kernel_ten_2<<<blocks_per_grid_on_kernel_ten,
+							threads_per_block_on_kernel_ten,
+							size_shared_data_on_kernel_ten, stream1>>>(
+								global_data_two_device,
+								x_device,
+								z_device);
+
+					cudaStreamEndCapture(stream1, &graph5);
+					cudaGraphInstantiate(&graphExec5, graph5, NULL, NULL, 0);	
+				}
+
+				cudaGraphLaunch(graphExec5, stream1);
+				cudaStreamSynchronize(stream1);									
 
 		global_data_reduce=0.0; 
 		global_data_two_reduce=0.0; 
@@ -706,7 +726,6 @@ int main(int argc, char** argv){
 		for(int i=0; i<blocks_per_grid_on_kernel_ten; i++){global_data_reduce+=global_data[i];global_data_two_reduce+=global_data_two[i];}
 		norm_temp1=global_data_reduce;
 		norm_temp2=global_data_two_reduce;
-
 		// to ponizej bylo tu juz wczesniej, jak to polaczyc z cuda graph?
 
 		norm_temp2 = 1.0 / sqrt(norm_temp2);

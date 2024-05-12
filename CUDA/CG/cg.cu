@@ -231,7 +231,7 @@ static void conj_grad(int colidx[],
 		double q[],
 		double r[],
 		double* rnorm);
-static void conj_grad_gpu(double* rnorm);
+static void conj_grad_gpu(double* rnorm, cudaStream_t stream);
 static void gpu_kernel_one();
 __global__ void gpu_kernel_one(double p[], 
 		double q[], 
@@ -254,10 +254,10 @@ __global__ void gpu_kernel_four(double* d,
 		double* q, 
 		double global_data[]);
 static void gpu_kernel_five(double alpha_host);
-__global__ void gpu_kernel_five_1(double alpha, 
+__global__ void gpu_kernel_five_1(double* alpha, 
 		double* p, 
 		double* z);
-__global__ void gpu_kernel_five_2(double alpha, 
+__global__ void gpu_kernel_five_2(double* alpha, 
 		double* q, 
 		double* r);
 static void gpu_kernel_six(double* rho_host);
@@ -497,9 +497,194 @@ int main(int argc, char** argv){
 	 * ---->
 	 * --------------------------------------------------------------------
 	 */
+
+	double *alpha_device_2;
+	cudaMalloc((void**)&alpha_device_2, sizeof(double));
+
+	cudaStream_t stream1;
+	cudaGraph_t graph1, graph2, graph3, graph4, graph5, graph6, graph7;
+	cudaGraphExec_t graphExec1, graphExec2, graphExec3, graphExec4, graphExec5, graphExec6, graphExec7;
+	cudaStreamCreate(&stream1);
+
+
+	// bool graphCreated = false;
+
 	for(it = 1; it <= NITER; it++){
+		double d, sum, rho, rho0, alpha, beta;
+		int cgit, cgitmax = 25;
+		
+		if (it ==1){
+			cudaStreamBeginCapture(stream1, cudaStreamCaptureModeGlobal);
+		
 		/* the call to the conjugate gradient routine */
-		conj_grad_gpu(&rnorm);
+		// conj_grad_gpu(&rnorm, stream1);
+
+
+			/* initialize the CG algorithm */
+			// gpu_kernel_one();
+
+				gpu_kernel_one<<<blocks_per_grid_on_kernel_one,
+					threads_per_block_on_kernel_one, 0, stream1>>>(
+							p_device, 
+							q_device, 
+							r_device, 
+							x_device, 
+							z_device);
+
+				/* rho = r.r - now, obtain the norm of r: first, sum squares of r elements locally */
+				// gpu_kernel_two(&rho);
+				gpu_kernel_two<<<blocks_per_grid_on_kernel_two,
+						threads_per_block_on_kernel_two,
+						size_shared_data_on_kernel_two,
+						stream1>>>(
+								r_device, 
+								rho_device, 
+								global_data_device);					
+
+				cudaStreamEndCapture(stream1, &graph1);
+				cudaGraphInstantiate(&graphExec1, graph1, NULL, NULL, 0);			
+		}
+			cudaGraphLaunch(graphExec1, stream1);
+			cudaStreamSynchronize(stream1);	
+
+
+			global_data_reduce=0.0; 
+			cudaMemcpy(global_data, global_data_device, size_reduce_memory_on_kernel_two, cudaMemcpyDeviceToHost);	
+			for(int i=0; i<blocks_per_grid_on_kernel_two; i++){global_data_reduce+=global_data[i];}
+			rho=global_data_reduce;
+
+
+			/* the conj grad iteration loop */
+			for(cgit = 1; cgit <= cgitmax; cgit++){
+				/* q = A.p */
+				// gpu_kernel_three();
+				if (it == 1 && cgit == 1){
+					cudaStreamBeginCapture(stream1, cudaStreamCaptureModeGlobal);
+
+					gpu_kernel_three<<<blocks_per_grid_on_kernel_three,
+						threads_per_block_on_kernel_three,
+						size_shared_data_on_kernel_three, stream1>>>(
+								colidx_device,
+								rowstr_device,
+								a_device,
+								p_device,
+								q_device);				
+
+						/* obtain p.q */
+						// gpu_kernel_four(&d);
+					gpu_kernel_four<<<blocks_per_grid_on_kernel_four,
+						threads_per_block_on_kernel_four,
+						size_shared_data_on_kernel_four, stream1>>>(
+								d_device, 
+								p_device,
+								q_device,
+								global_data_device);
+
+					cudaStreamEndCapture(stream1, &graph2);
+					cudaGraphInstantiate(&graphExec2, graph2, NULL, NULL, 0);	
+				}
+
+				cudaGraphLaunch(graphExec2, stream1);
+				cudaStreamSynchronize(stream1);		
+
+				global_data_reduce=0.0; 
+				cudaMemcpy(global_data, global_data_device, size_reduce_memory_on_kernel_four, cudaMemcpyDeviceToHost);
+				for(int i=0; i<blocks_per_grid_on_kernel_four; i++){global_data_reduce+=global_data[i];}
+				d=global_data_reduce;				
+
+				alpha = rho / d;
+
+				cudaMemcpy(alpha_device_2, &alpha, sizeof(double), cudaMemcpyHostToDevice);
+
+				/* save a temporary of rho */
+				rho0 = rho;
+
+				/* obtain (z = z + alpha*p) and (r = r - alpha*q) */
+				// gpu_kernel_five(alpha);
+				if (it == 1 && cgit == 1){
+					cudaStreamBeginCapture(stream1, cudaStreamCaptureModeGlobal);
+
+					gpu_kernel_five_1<<<blocks_per_grid_on_kernel_five,
+						threads_per_block_on_kernel_five, 0 ,stream1>>>(
+								alpha_device_2,
+								p_device,
+								z_device);
+					gpu_kernel_five_2<<<blocks_per_grid_on_kernel_five,
+						threads_per_block_on_kernel_five, 0, stream1>>>(
+								alpha_device_2,
+								q_device,
+								r_device);				
+
+					/* rho = r.r - now, obtain the norm of r: first, sum squares of r elements locally */
+					// gpu_kernel_six(&rho);
+					gpu_kernel_six<<<blocks_per_grid_on_kernel_six,
+						threads_per_block_on_kernel_six,
+						size_shared_data_on_kernel_six, stream1>>>(
+								r_device, 
+								global_data_device);
+					
+					cudaStreamEndCapture(stream1, &graph3);
+					cudaGraphInstantiate(&graphExec3, graph3, NULL, NULL, 0);	
+				}
+
+				cudaGraphLaunch(graphExec3, stream1);
+				cudaStreamSynchronize(stream1);	
+
+				global_data_reduce=0.0;
+				cudaMemcpy(global_data, global_data_device, size_reduce_memory_on_kernel_six, cudaMemcpyDeviceToHost);
+				for(int i=0; i<blocks_per_grid_on_kernel_six; i++){global_data_reduce+=global_data[i];}
+				rho=global_data_reduce;				
+
+				/* obtain beta */
+				beta = rho / rho0;
+
+				/* p = r + beta*p */
+				// gpu_kernel_seven(beta);
+
+				gpu_kernel_seven<<<blocks_per_grid_on_kernel_seven,
+					threads_per_block_on_kernel_seven>>>(
+							beta,
+							p_device,
+							r_device);				
+			} /* end of do cgit=1, cgitmax */
+
+			/* compute residual norm explicitly:  ||r|| = ||x - A.z|| */
+			// gpu_kernel_eight();
+				// if (it == 1 && cgit == 1){
+				// 	cudaStreamBeginCapture(stream1, cudaStreamCaptureModeGlobal);
+
+					gpu_kernel_eight<<<blocks_per_grid_on_kernel_eight,
+						threads_per_block_on_kernel_eight,
+						size_shared_data_on_kernel_eight>>>(
+								colidx_device, 
+								rowstr_device, 
+								a_device, 
+								r_device, 
+								z_device);
+
+					/* at this point, r contains A.z */
+					// gpu_kernel_nine(&sum);
+					gpu_kernel_nine<<<blocks_per_grid_on_kernel_nine,
+						threads_per_block_on_kernel_nine,
+						size_shared_data_on_kernel_nine>>>(
+								r_device, 
+								x_device, 
+								sum_device,
+								global_data_device);
+
+				// 	cudaStreamEndCapture(stream1, &graph3);
+				// 	cudaGraphInstantiate(&graphExec3, graph3, NULL, NULL, 0);	
+				// }
+
+				// cudaGraphLaunch(graphExec3, stream1);
+				// cudaStreamSynchronize(stream1);	
+
+			global_data_reduce=0.0;
+			cudaMemcpy(global_data, global_data_device, size_reduce_memory_on_kernel_nine, cudaMemcpyDeviceToHost);
+			for(int i=0; i<blocks_per_grid_on_kernel_nine; i++){global_data_reduce+=global_data[i];}
+			sum=global_data_reduce;			
+
+			rnorm = sqrt(sum);		
 
 		/*
 		 * --------------------------------------------------------------------
@@ -509,14 +694,32 @@ int main(int argc, char** argv){
 		 * so, first: (z.z)
 		 * --------------------------------------------------------------------
 		 */
-		gpu_kernel_ten(&norm_temp1, &norm_temp2);
+		// gpu_kernel_ten(&norm_temp1, &norm_temp2);
+		gpu_kernel_ten_1<<<blocks_per_grid_on_kernel_ten,threads_per_block_on_kernel_ten,size_shared_data_on_kernel_ten>>>(global_data_device,x_device,z_device);
+		gpu_kernel_ten_2<<<blocks_per_grid_on_kernel_ten,threads_per_block_on_kernel_ten,size_shared_data_on_kernel_ten>>>(global_data_two_device,x_device,z_device);
+
+		global_data_reduce=0.0; 
+		global_data_two_reduce=0.0; 
+		cudaMemcpy(global_data, global_data_device, size_reduce_memory_on_kernel_ten, cudaMemcpyDeviceToHost);
+		cudaMemcpy(global_data_two, global_data_two_device, size_reduce_memory_on_kernel_ten, cudaMemcpyDeviceToHost);
+
+		for(int i=0; i<blocks_per_grid_on_kernel_ten; i++){global_data_reduce+=global_data[i];global_data_two_reduce+=global_data_two[i];}
+		norm_temp1=global_data_reduce;
+		norm_temp2=global_data_two_reduce;
+
+		// to ponizej bylo tu juz wczesniej, jak to polaczyc z cuda graph?
+
 		norm_temp2 = 1.0 / sqrt(norm_temp2);
 		zeta = SHIFT + 1.0 / norm_temp1;
 		if(it==1){printf("\n   iteration           ||r||                 zeta\n");}
 		printf("    %5d       %20.14e%20.13e\n", it, rnorm, zeta);
 
 		/* normalize z to obtain x */
-		gpu_kernel_eleven(norm_temp2);
+		// gpu_kernel_eleven(norm_temp2);
+		gpu_kernel_eleven<<<blocks_per_grid_on_kernel_eleven, threads_per_block_on_kernel_eleven>>>(
+					norm_temp2,
+					x_device,
+					z_device);		
 	} /* end of main iter inv pow meth */
 
 	timer_stop(PROFILING_TOTAL_TIME);
@@ -640,6 +843,7 @@ int main(int argc, char** argv){
 			(char*)CS7);
 
 	release_gpu();
+	cudaFree(alpha_device_2);
 
 	return 0;
 }
@@ -800,7 +1004,7 @@ static void conj_grad(int colidx[],
 	*rnorm = sqrt(sum);
 }
 
-static void conj_grad_gpu(double* rnorm){
+static void conj_grad_gpu(double* rnorm, cudaStream_t stream){
 	double d, sum, rho, rho0, alpha, beta;
 	int cgit, cgitmax = 25;
 
@@ -1003,39 +1207,40 @@ __global__ void gpu_kernel_four(double* d,
 	if(local_id==0){global_data[blockIdx.x]=share_data[0];}
 }
 
-static void gpu_kernel_five(double alpha_host){
-#if defined(PROFILING)
-	timer_start(PROFILING_KERNEL_FIVE);
-#endif
-	gpu_kernel_five_1<<<blocks_per_grid_on_kernel_five,
-		threads_per_block_on_kernel_five>>>(
-				alpha_host,
-				p_device,
-				z_device);
-	gpu_kernel_five_2<<<blocks_per_grid_on_kernel_five,
-		threads_per_block_on_kernel_five>>>(
-				alpha_host,
-				q_device,
-				r_device);
-#if defined(PROFILING)
-	timer_stop(PROFILING_KERNEL_FIVE);
-#endif
-} 
+// static void gpu_kernel_five(double alpha_host){
+// #if defined(PROFILING)
+// 	timer_start(PROFILING_KERNEL_FIVE);
+// #endif
+	// gpu_kernel_five_1<<<blocks_per_grid_on_kernel_five,
+// 		threads_per_block_on_kernel_five>>>(
+// 				alpha_host,
+// 				p_device,
+// 				z_device);
+// 	gpu_kernel_five_2<<<blocks_per_grid_on_kernel_five,
+// 		threads_per_block_on_kernel_five>>>(
+// 				alpha_host,
+// 				q_device,
+// 				r_device);
+// #if defined(PROFILING)
+// 	timer_stop(PROFILING_KERNEL_FIVE);
+// #endif
+// } 
 
-__global__ void gpu_kernel_five_1(double alpha, 
+__global__ void gpu_kernel_five_1(double* alpha, 
 		double* p, 
 		double* z){
 	int j = blockIdx.x * blockDim.x + threadIdx.x;
 	if(j >= NA){return;}
-	z[j] += alpha * p[j];
+	z[j] += alpha[0] * p[j];
+	// printf("Alpha %f: ", alpha[0]);
 }
 
-__global__ void gpu_kernel_five_2(double alpha, 
+__global__ void gpu_kernel_five_2(double* alpha, 
 		double* q, 
 		double* r){
 	int j = blockIdx.x * blockDim.x + threadIdx.x;
 	if(j >= NA){return;}
-	r[j] -= alpha * q[j];
+	r[j] -= alpha[0] * q[j];
 }
 
 static void gpu_kernel_six(double* rho_host){

@@ -218,14 +218,14 @@ namespace constants_device{
 }
 
 /* function prototypes */
-static void add_gpu();
+static void add_gpu(cudaStream_t &stream);
 __global__ static void add_gpu_kernel(double* u, 
 		const double* rhs, 
 		const int nx, 
 		const int ny, 
 		const int nz);
-static void adi_gpu();
-static void compute_rhs_gpu();
+static void adi_gpu(cudaStream_t &stream);
+static void compute_rhs_gpu(cudaStream_t &stream);
 __global__ static void compute_rhs_gpu_kernel_1(double* rho_i, 
 		double* us, 
 		double* vs, 
@@ -249,7 +249,7 @@ __global__ static void compute_rhs_gpu_kernel_2(const double* rho_i,
 		const int nx, 
 		const int ny, 
 		const int nz);
-static void error_norm_gpu(double rms[]);
+static void error_norm_gpu(double rms[], cudaStream_t &stream);
 __global__ static void error_norm_gpu_kernel_1(double* rms,
 		const double* u,
 		const int nx,
@@ -259,7 +259,7 @@ __global__ static void error_norm_gpu_kernel_2(double* rms,
 		const int nx,
 		const int ny,
 		const int nz);	
-static void exact_rhs_gpu();	
+static void exact_rhs_gpu(cudaStream_t &stream);	
 __global__ static void exact_rhs_gpu_kernel_1(double* forcing, 
 		const int nx,
 		const int ny,
@@ -280,13 +280,13 @@ __device__ static void exact_solution_gpu_device(const double xi,
 		const double eta,
 		const double zeta,
 		double* dtemp);		
-static void initialize_gpu();
+static void initialize_gpu(cudaStream_t &stream);
 __global__ static void initialize_gpu_kernel(double* u,
 		const int nx,
 		const int ny,
 		const int nz);
 static void release_gpu();
-static void rhs_norm_gpu(double rms[]);
+static void rhs_norm_gpu(double rms[], cudaStream_t &stream);
 __global__ static void rhs_norm_gpu_kernel_1(double* rms,
 		const double* rhs,
 		const int nx,
@@ -298,7 +298,7 @@ __global__ static void rhs_norm_gpu_kernel_2(double* rms,
 		const int nz);	
 static void set_constants();
 static void setup_gpu();
-static void txinvr_gpu();
+static void txinvr_gpu(cudaStream_t &stream);
 __global__ static void txinvr_gpu_kernel(const double* rho_i, 
 		const double* us, 
 		const double* vs, 
@@ -311,8 +311,9 @@ __global__ static void txinvr_gpu_kernel(const double* rho_i,
 		const int nz);
 static void verify_gpu(int no_time_steps,
 		char* class_npb,
-		boolean* verified);
-static void x_solve_gpu();
+		boolean* verified,
+		cudaStream_t &stream);
+static void x_solve_gpu(cudaStream_t &stream);
 __global__ static void x_solve_gpu_kernel(const double* rho_i, 
 		const double* us, 
 		const double* speed, 
@@ -322,7 +323,7 @@ __global__ static void x_solve_gpu_kernel(const double* rho_i,
 		const int nx, 
 		const int ny, 
 		const int nz);
-static void y_solve_gpu();
+static void y_solve_gpu(cudaStream_t &stream);
 __global__ static void y_solve_gpu_kernel(const double* rho_i, 
 		const double* vs, 
 		const double* speed, 
@@ -332,7 +333,7 @@ __global__ static void y_solve_gpu_kernel(const double* rho_i,
 		const int nx, 
 		const int ny, 
 		const int nz);
-static void z_solve_gpu();
+static void z_solve_gpu(cudaStream_t &stream);
 __global__ static void z_solve_gpu_kernel(const double* rho_i,
 		const double* us,
 		const double* vs,
@@ -346,6 +347,10 @@ __global__ static void z_solve_gpu_kernel(const double* rho_i,
 		const int nx,
 		const int ny,
 		const int nz);
+
+
+cudaStream_t stream1;
+cudaStreamCaptureStatus stream_capture_or_not;
 
 /* sp */
 int main(int argc, char** argv){
@@ -396,6 +401,7 @@ int main(int argc, char** argv){
 	nx=grid_points[0];
 	ny=grid_points[1];
 	nz=grid_points[2];
+
 	setup_gpu();
 	set_constants();
 	timer_clear(PROFILING_TOTAL_TIME);
@@ -417,15 +423,19 @@ int main(int argc, char** argv){
 	timer_clear(PROFILING_Y_SOLVE);
 	timer_clear(PROFILING_Z_SOLVE);
 #endif
-	exact_rhs_gpu();
-	initialize_gpu();
+
+
+	exact_rhs_gpu(stream1);
+
+	initialize_gpu(stream1);
 	/*
 	 * ---------------------------------------------------------------------
 	 * do one time step to touch all code, and reinitialize
 	 * ---------------------------------------------------------------------
 	 */
-	adi_gpu();
-	initialize_gpu();
+	adi_gpu(stream1);
+
+	initialize_gpu(stream1);
 	timer_clear(PROFILING_TOTAL_TIME);
 #if defined(PROFILING)
 	timer_clear(PROFILING_ADD);
@@ -446,13 +456,15 @@ int main(int argc, char** argv){
 	timer_clear(PROFILING_Z_SOLVE);
 #endif
 	timer_start(PROFILING_TOTAL_TIME);/*#start_timer*/
+
 	for(step=1;step<=niter;step++){
 		if((step%20)==0||step==1){printf(" Time step %4d\n",step);}
-		adi_gpu();
+		adi_gpu(stream1);
 	}
+
 	timer_stop(PROFILING_TOTAL_TIME);/*#stop_timer*/
 	tmax=timer_read(PROFILING_TOTAL_TIME);
-	verify_gpu(niter, &class_npb, &verified);
+	verify_gpu(niter, &class_npb, &verified, stream1);
 	if(tmax!=0.0){
 		n3=grid_points[0]*grid_points[1]*grid_points[2];
 		t=(grid_points[0]+grid_points[1]+grid_points[2])/3.0;
@@ -562,6 +574,7 @@ int main(int argc, char** argv){
 			(char*)"(none)");
 	release_gpu();
 	return 0;
+	cudaStreamDestroy(stream1);
 }
 
 /*
@@ -569,7 +582,7 @@ int main(int argc, char** argv){
  * addition of update to the vector u
  * ---------------------------------------------------------------------
  */
-static void add_gpu(){
+static void add_gpu(cudaStream_t &stream){
 #if defined(PROFILING)
 	timer_start(PROFILING_ADD);
 #endif
@@ -580,7 +593,7 @@ static void add_gpu(){
 
 	add_gpu_kernel<<<
 		add_blocks_per_grid, 
-		add_threads_per_block>>>(
+		add_threads_per_block, 0, stream>>>(
 				u_device, 
 				rhs_device, 
 				nx, 
@@ -621,16 +634,47 @@ __global__ static void add_gpu_kernel(double* u,
 	u(4,i,j,k)+=rhs(4,i,j,k);
 }
 
-static void adi_gpu(){
-	compute_rhs_gpu();
-	txinvr_gpu();
-	x_solve_gpu();
-	y_solve_gpu();
-	z_solve_gpu();
-	add_gpu();
+static void adi_gpu(cudaStream_t &stream){
+
+	static cudaGraph_t graph3;
+	static cudaGraphExec_t graphExec3;
+	static bool graphCreated3 = false;
+
+	if (!graphCreated3) {
+		printf("graphCreated3 = false\n");
+		cudaStreamCreate(&stream);
+
+		cudaStreamBeginCapture(stream, cudaStreamCaptureModeGlobal);	
+		cudaStreamIsCapturing(stream, &stream_capture_or_not);
+
+		if (stream_capture_or_not == cudaStreamCaptureStatusActive){
+			printf("This stream 1 is being captured\n");
+		}
+
+			compute_rhs_gpu(stream);
+			txinvr_gpu(stream);
+			x_solve_gpu(stream);
+			y_solve_gpu(stream);
+			z_solve_gpu(stream);
+			add_gpu(stream);
+
+		cudaStreamEndCapture(stream, &graph3);
+		cudaGraphInstantiate(&graphExec3, graph3, NULL, NULL, 0);
+		cudaGraphLaunch(graphExec3, stream);						
+
+		graphCreated3 = true;
+	}
+
+	if (graphCreated3){
+		cudaGraphLaunch(graphExec3, stream);
+		cudaStreamSynchronize(stream);
+		// return graph1;
+		// cudaGraphDestroy(graph1);
+		// cudaGraphExecDestroy(graphExec1);
+	}
 }
 
-static void compute_rhs_gpu(){
+static void compute_rhs_gpu(cudaStream_t &stream){
 #if defined(PROFILING)
 	timer_start(PROFILING_COMPUTE_RHS_1);
 #endif
@@ -641,7 +685,7 @@ static void compute_rhs_gpu(){
 
 	compute_rhs_gpu_kernel_1<<<
 		compute_rhs_1_blocks_per_grid,
-		compute_rhs_1_threads_per_block>>>(
+		compute_rhs_1_threads_per_block, 0, stream>>>(
 				rho_i_device, 
 				us_device, 
 				vs_device, 
@@ -672,7 +716,7 @@ static void compute_rhs_gpu(){
 
 	compute_rhs_gpu_kernel_2<<<
 		compute_rhs_2_blocks_per_grid, 
-		compute_rhs_2_threads_per_block>>>(
+		compute_rhs_2_threads_per_block, 0, stream>>>(
 				rho_i_device, 
 				us_device, 
 				vs_device, 
@@ -863,7 +907,7 @@ __global__ static void compute_rhs_gpu_kernel_2(const double* rho_i,
  * computed solution and the exact solution
  * ---------------------------------------------------------------------
  */
-static void error_norm_gpu(double rms[]){
+static void error_norm_gpu(double rms[], cudaStream_t &stream){
 #if defined(PROFILING)
 	timer_start(PROFILING_ERROR_NORM_1);
 #endif
@@ -873,7 +917,7 @@ static void error_norm_gpu(double rms[]){
 
 	error_norm_gpu_kernel_1<<<
 		error_norm_1_blocks_per_grid, 
-		error_norm_1_threads_per_block>>>(
+		error_norm_1_threads_per_block, 0, stream>>>(
 				rms_buffer_device, 
 				u_device, 
 				nx, 
@@ -893,7 +937,7 @@ static void error_norm_gpu(double rms[]){
 	error_norm_gpu_kernel_2<<<
 		error_norm_2_blocks_per_grid,
 		error_norm_2_threads_per_block,
-		sizeof(double)*error_norm_2_threads_per_block*5>>>(
+		sizeof(double)*error_norm_2_threads_per_block*5, stream>>>(
 				rms_buffer_device, 
 				nx, 
 				ny, 
@@ -902,7 +946,7 @@ static void error_norm_gpu(double rms[]){
 	timer_stop(PROFILING_ERROR_NORM_2);
 #endif
 
-	cudaMemcpy(rms, rms_buffer_device, 5*sizeof(double), cudaMemcpyDeviceToHost);
+	cudaMemcpyAsync(rms, rms_buffer_device, 5*sizeof(double), cudaMemcpyDeviceToHost, stream);
 }
 
 __global__ static void error_norm_gpu_kernel_1(double* rms,
@@ -969,7 +1013,12 @@ __global__ static void error_norm_gpu_kernel_2(double* rms,
  * compute the right hand side based on exact solution
  * ---------------------------------------------------------------------
  */
-static void exact_rhs_gpu(){
+static void exact_rhs_gpu(cudaStream_t &stream){
+
+	static cudaGraph_t graph1;
+	static cudaGraphExec_t graphExec1;
+	static bool graphCreated1 = false;
+
 #if defined(PROFILING)
 	timer_start(PROFILING_EXACT_RHS_1);
 #endif
@@ -978,88 +1027,121 @@ static void exact_rhs_gpu(){
 	int rhs1_threads_per_block = THREADS_PER_BLOCK_ON_EXACT_RHS_1;
 	int rhs1_blocks_per_grid = (ceil((double)rhs1_workload/(double)rhs1_threads_per_block));
 
-	exact_rhs_gpu_kernel_1<<<
-		rhs1_blocks_per_grid,
-		rhs1_threads_per_block>>>(
-				forcing_device, 
-				nx, 
-				ny, 
-				nz);
-#if defined(PROFILING)
-	timer_stop(PROFILING_EXACT_RHS_1);
-#endif
+	if (!graphCreated1) {
+		printf("graphCreated1 = false\n");
+		cudaStreamCreate(&stream);
 
-#if defined(PROFILING)
-	timer_start(PROFILING_EXACT_RHS_2);
-#endif
-	/* #KERNEL EXACT RHS 2 */
-	int rhs2_threads_per_block;
-	dim3 rhs2_blocks_per_grid(nz, ny);
-	if(THREADS_PER_BLOCK_ON_EXACT_RHS_2 > nx){
-		rhs2_threads_per_block = nx;
-	}
-	else{
-		rhs2_threads_per_block = THREADS_PER_BLOCK_ON_EXACT_RHS_2;
+		cudaStreamBeginCapture(stream, cudaStreamCaptureModeGlobal);	
+		cudaStreamIsCapturing(stream, &stream_capture_or_not);
+
+		if (stream_capture_or_not == cudaStreamCaptureStatusActive){
+			printf("This stream 1 is being captured\n");
+		}
+			
+		exact_rhs_gpu_kernel_1<<<
+				rhs1_blocks_per_grid,
+				rhs1_threads_per_block, 0, stream>>>(
+						forcing_device, 
+						nx, 
+						ny, 
+						nz);
+
+		#if defined(PROFILING)
+			timer_stop(PROFILING_EXACT_RHS_1);
+		#endif
+
+		#if defined(PROFILING)
+			timer_start(PROFILING_EXACT_RHS_2);
+		#endif
+			/* #KERNEL EXACT RHS 2 */
+			int rhs2_threads_per_block;
+			dim3 rhs2_blocks_per_grid(nz, ny);
+			if(THREADS_PER_BLOCK_ON_EXACT_RHS_2 > nx){
+				rhs2_threads_per_block = nx;
+			}
+			else{
+				rhs2_threads_per_block = THREADS_PER_BLOCK_ON_EXACT_RHS_2;
+			}
+
+			exact_rhs_gpu_kernel_2<<<
+				rhs2_blocks_per_grid,
+				rhs2_threads_per_block, 0, stream>>>(
+						forcing_device, 
+						nx, 
+						ny, 
+						nz);
+
+
+		#if defined(PROFILING)
+			timer_stop(PROFILING_EXACT_RHS_2);
+		#endif
+
+		#if defined(PROFILING)
+			timer_start(PROFILING_EXACT_RHS_3);
+		#endif			
+			/* #KERNEL EXACT RHS 3 */
+			int rhs3_threads_per_block;
+			dim3 rhs3_blocks_per_grid(nz, nx);
+			if(THREADS_PER_BLOCK_ON_EXACT_RHS_3 > ny){
+				rhs3_threads_per_block = ny;
+			}
+			else{
+				rhs3_threads_per_block = THREADS_PER_BLOCK_ON_EXACT_RHS_3;
+			}
+
+			exact_rhs_gpu_kernel_3<<<
+				rhs3_blocks_per_grid, 
+				rhs3_threads_per_block, 0, stream>>>(
+						forcing_device, 
+						nx, 
+						ny, 
+						nz);
+
+
+		#if defined(PROFILING)
+			timer_stop(PROFILING_EXACT_RHS_3);
+		#endif
+
+		#if defined(PROFILING)
+			timer_start(PROFILING_EXACT_RHS_4);
+		#endif
+			/* #KERNEL EXACT RHS 4 */
+			int rhs4_threads_per_block;
+			dim3 rhs4_blocks_per_grid(ny, nx);
+			if(THREADS_PER_BLOCK_ON_EXACT_RHS_4 > nz){
+				rhs4_threads_per_block = nz;
+			}
+			else{
+				rhs4_threads_per_block = THREADS_PER_BLOCK_ON_EXACT_RHS_4;
+			}
+
+			exact_rhs_gpu_kernel_4<<<
+				rhs4_blocks_per_grid, 
+				rhs4_threads_per_block, 0, stream>>>(
+						forcing_device, 
+						nx, 
+						ny, 
+						nz);
+
+		cudaStreamEndCapture(stream, &graph1);
+		cudaGraphInstantiate(&graphExec1, graph1, NULL, NULL, 0);
+		cudaGraphLaunch(graphExec1, stream);						
+
+		graphCreated1 = true;
 	}
 
-	exact_rhs_gpu_kernel_2<<<
-		rhs2_blocks_per_grid,
-		rhs2_threads_per_block>>>(
-				forcing_device, 
-				nx, 
-				ny, 
-				nz);
-#if defined(PROFILING)
-	timer_stop(PROFILING_EXACT_RHS_2);
-#endif
-
-#if defined(PROFILING)
-	timer_start(PROFILING_EXACT_RHS_3);
-#endif			
-	/* #KERNEL EXACT RHS 3 */
-	int rhs3_threads_per_block;
-	dim3 rhs3_blocks_per_grid(nz, nx);
-	if(THREADS_PER_BLOCK_ON_EXACT_RHS_3 > ny){
-		rhs3_threads_per_block = ny;
-	}
-	else{
-		rhs3_threads_per_block = THREADS_PER_BLOCK_ON_EXACT_RHS_3;
+	if (graphCreated1){
+		cudaGraphLaunch(graphExec1, stream);
+		cudaStreamSynchronize(stream);
+		// return graph1;
+		// cudaGraphDestroy(graph1);
+		// cudaGraphExecDestroy(graphExec1);
 	}
 
-	exact_rhs_gpu_kernel_3<<<
-		rhs3_blocks_per_grid, 
-		rhs3_threads_per_block>>>(
-				forcing_device, 
-				nx, 
-				ny, 
-				nz);
-#if defined(PROFILING)
-	timer_stop(PROFILING_EXACT_RHS_3);
-#endif
-
-#if defined(PROFILING)
-	timer_start(PROFILING_EXACT_RHS_4);
-#endif
-	/* #KERNEL EXACT RHS 4 */
-	int rhs4_threads_per_block;
-	dim3 rhs4_blocks_per_grid(ny, nx);
-	if(THREADS_PER_BLOCK_ON_EXACT_RHS_4 > nz){
-		rhs4_threads_per_block = nz;
-	}
-	else{
-		rhs4_threads_per_block = THREADS_PER_BLOCK_ON_EXACT_RHS_4;
-	}
-
-	exact_rhs_gpu_kernel_4<<<
-		rhs4_blocks_per_grid, 
-		rhs4_threads_per_block>>>(
-				forcing_device, 
-				nx, 
-				ny, 
-				nz);
-#if defined(PROFILING)
-	timer_stop(PROFILING_EXACT_RHS_4);
-#endif
+		#if defined(PROFILING)
+			timer_stop(PROFILING_EXACT_RHS_4);
+		#endif		
+	
 }
 
 __global__ static void exact_rhs_gpu_kernel_1(double* forcing, 
@@ -1370,30 +1452,61 @@ __device__ static void exact_solution_gpu_device(const double xi,
  * tri-linear transfinite interpolation of the boundary values     
  * ---------------------------------------------------------------------
  */
-static void initialize_gpu(){
+static void initialize_gpu(cudaStream_t &stream){
+
+	static cudaGraph_t graph2;
+	static cudaGraphExec_t graphExec2;
+	static bool graphCreated2 = false;
+
 #if defined(PROFILING)
 	timer_start(PROFILING_INITIALIZE);
 #endif
-	/* #KERNEL INITIALIZE */
-	int initialize_threads_per_block;
-	dim3 initialize_blocks_per_grid(nz, ny);
-	if(THREADS_PER_BLOCK_ON_INITIALIZE != nx){
-		initialize_threads_per_block = nx;
-	}
-	else{
-		initialize_threads_per_block = THREADS_PER_BLOCK_ON_INITIALIZE;
-	}
 
-	initialize_gpu_kernel<<<
-		initialize_blocks_per_grid, 
-		initialize_threads_per_block>>>(
-				u_device, 
-				nx, 
-				ny, 
-				nz);
+if (!graphCreated2) {
+		printf("graphCreated2 = false\n");
+		cudaStreamCreate(&stream);
+
+		cudaStreamBeginCapture(stream, cudaStreamCaptureModeGlobal);	
+		cudaStreamIsCapturing(stream, &stream_capture_or_not);
+
+		if (stream_capture_or_not == cudaStreamCaptureStatusActive){
+			printf("This stream 2 is being captured\n");
+		}
+
+	/* #KERNEL INITIALIZE */
+		int initialize_threads_per_block;
+		dim3 initialize_blocks_per_grid(nz, ny);
+		if(THREADS_PER_BLOCK_ON_INITIALIZE != nx){
+			initialize_threads_per_block = nx;
+		}
+		else{
+			initialize_threads_per_block = THREADS_PER_BLOCK_ON_INITIALIZE;
+		}
+
+		initialize_gpu_kernel<<<
+			initialize_blocks_per_grid, 
+			initialize_threads_per_block, 0, stream>>>(
+					u_device, 
+					nx, 
+					ny, 
+					nz);
 #if defined(PROFILING)
 	timer_stop(PROFILING_INITIALIZE);
 #endif
+		cudaStreamEndCapture(stream, &graph2);
+		cudaGraphInstantiate(&graphExec2, graph2, NULL, NULL, 0);
+		cudaGraphLaunch(graphExec2, stream);						
+
+		graphCreated2 = true;
+	}
+
+	if (graphCreated2){
+		cudaGraphLaunch(graphExec2, stream);
+		cudaStreamSynchronize(stream);
+		// return graph1;
+		// cudaGraphDestroy(graph1);
+		// cudaGraphExecDestroy(graphExec1);
+	}
 }
 
 __global__ static void initialize_gpu_kernel(double* u,
@@ -1534,7 +1647,7 @@ static void release_gpu(){
 	cudaFree(rms_buffer_device);
 }
 
-static void rhs_norm_gpu(double rms[]){
+static void rhs_norm_gpu(double rms[], cudaStream_t &stream){
 #if defined(PROFILING)
 	timer_start(PROFILING_RHS_NORM_1);
 #endif
@@ -1544,7 +1657,7 @@ static void rhs_norm_gpu(double rms[]){
 
 	rhs_norm_gpu_kernel_1<<<
 		rhs_norm_1_blocks_per_grid, 
-		rhs_norm_1_threads_per_block>>>(
+		rhs_norm_1_threads_per_block, 0, stream>>>(
 				rms_buffer_device, 
 				rhs_device, 
 				nx, 
@@ -1564,7 +1677,7 @@ static void rhs_norm_gpu(double rms[]){
 	rhs_norm_gpu_kernel_2<<<
 		rhs_norm_2_blocks_per_grid,
 		rhs_norm_2_threads_per_block,
-		sizeof(double)*rhs_norm_2_threads_per_block*5>>>(
+		sizeof(double)*rhs_norm_2_threads_per_block*5, stream>>>(
 				rms_buffer_device, 
 				nx, 
 				ny, 
@@ -1573,7 +1686,7 @@ static void rhs_norm_gpu(double rms[]){
 	timer_stop(PROFILING_RHS_NORM_2);
 #endif
 
-	cudaMemcpy(rms, rms_buffer_device, 5*sizeof(double), cudaMemcpyDeviceToHost);
+	cudaMemcpyAsync(rms, rms_buffer_device, 5*sizeof(double), cudaMemcpyDeviceToHost, stream);
 }
 
 __global__ static void rhs_norm_gpu_kernel_1(double* rms,
@@ -2108,7 +2221,7 @@ static void setup_gpu(){
  * block-diagonal matrix-vector multiplication                  
  * ---------------------------------------------------------------------
  */
-static void txinvr_gpu(){
+static void txinvr_gpu(cudaStream_t &stream){
 #if defined(PROFILING)
 	timer_start(PROFILING_TXINVR);
 #endif
@@ -2119,7 +2232,7 @@ static void txinvr_gpu(){
 
 	txinvr_gpu_kernel<<<
 		txinvr_blocks_per_grid, 
-		txinvr_threads_per_block>>>(
+		txinvr_threads_per_block, 0,stream>>>(
 				rho_i_device, 
 				us_device, 
 				vs_device, 
@@ -2186,7 +2299,13 @@ __global__ static void txinvr_gpu_kernel(const double* rho_i,
  */
 static void verify_gpu(int no_time_steps,
 		char* class_npb,
-		boolean* verified){
+		boolean* verified,
+		cudaStream_t &stream){
+
+	static cudaGraph_t graph4;
+	static cudaGraphExec_t graphExec4;
+	static bool graphCreated4 = false;
+
 	double dt=dt_host;
 	double xcrref[5], xceref[5], xcrdif[5], xcedif[5], epsilon, xce[5], xcr[5], dtref;
 	int m;
@@ -2201,9 +2320,40 @@ static void verify_gpu(int no_time_steps,
 	 * compute the error norm and the residual norm, and exit if not printing
 	 * ---------------------------------------------------------------------
 	 */
-	error_norm_gpu(xce);
-	compute_rhs_gpu();
-	rhs_norm_gpu(xcr);
+	if (!graphCreated4) {
+		printf("graphCreated4 = false\n");
+		cudaStreamCreate(&stream);
+
+		cudaStreamBeginCapture(stream, cudaStreamCaptureModeGlobal);	
+		cudaStreamIsCapturing(stream, &stream_capture_or_not);
+
+		if (stream_capture_or_not == cudaStreamCaptureStatusActive){
+			printf("This stream 1 is being captured\n");
+		}
+
+		error_norm_gpu(xce, stream);
+
+
+		compute_rhs_gpu(stream);
+
+
+		rhs_norm_gpu(xcr, stream);
+
+		cudaStreamEndCapture(stream, &graph4);
+		cudaGraphInstantiate(&graphExec4, graph4, NULL, NULL, 0);
+		cudaGraphLaunch(graphExec4, stream);						
+
+		graphCreated4 = true;
+	}
+
+	if (graphCreated4){
+		cudaGraphLaunch(graphExec4, stream);
+		cudaStreamSynchronize(stream);
+		// return graph1;
+		// cudaGraphDestroy(graph1);
+		// cudaGraphExecDestroy(graphExec1);
+	}
+
 	for(m=0;m<5;m++){xcr[m]=xcr[m]/dt;}
 	*class_npb='U';
 	*verified=TRUE;
@@ -2487,7 +2637,7 @@ static void verify_gpu(int no_time_steps,
  * systems for the x-lines. boundary conditions are non-periodic
  * ---------------------------------------------------------------------
  */
-static void x_solve_gpu(){
+static void x_solve_gpu(cudaStream_t &stream){
 #if defined(PROFILING)
 	timer_start(PROFILING_X_SOLVE);
 #endif
@@ -2503,7 +2653,7 @@ static void x_solve_gpu(){
 
 	x_solve_gpu_kernel<<<
 		x_solve_blocks_per_grid,
-		x_solve_threads_per_block>>>(
+		x_solve_threads_per_block, 0, stream>>>(
 				rho_i_device, 
 				us_device,
 				speed_device,
@@ -2900,7 +3050,7 @@ __global__ static void x_solve_gpu_kernel(const double* rho_i,
  * systems for the y-lines. boundary conditions are non-periodic
  * ---------------------------------------------------------------------
  */
-static void y_solve_gpu(){
+static void y_solve_gpu(cudaStream_t &stream){
 #if defined(PROFILING)
 	timer_start(PROFILING_Y_SOLVE);
 #endif
@@ -2916,7 +3066,7 @@ static void y_solve_gpu(){
 
 	y_solve_gpu_kernel<<<
 		y_solve_blocks_per_grid,
-		y_solve_threads_per_block>>>(
+		y_solve_threads_per_block, 0, stream>>>(
 				rho_i_device, 
 				vs_device, 
 				speed_device, 
@@ -3302,7 +3452,7 @@ __global__ static void y_solve_gpu_kernel(const double* rho_i,
  * systems for the z-lines. Boundary conditions are non-periodic
  * ---------------------------------------------------------------------
  */
-static void z_solve_gpu(){
+static void z_solve_gpu(cudaStream_t &stream){
 #if defined(PROFILING)
 	timer_start(PROFILING_Z_SOLVE);
 #endif
@@ -3318,7 +3468,7 @@ static void z_solve_gpu(){
 
 	z_solve_gpu_kernel<<<
 		z_solve_blocks_per_grid, 
-		z_solve_threads_per_block>>>(
+		z_solve_threads_per_block, 0, stream>>>(
 				rho_i_device,
 				us_device,
 				vs_device,

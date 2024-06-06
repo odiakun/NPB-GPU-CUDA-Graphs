@@ -230,11 +230,11 @@ namespace constants_device{
 		     ce[5][13];
 }
 
-static void add_gpu();
+static void add_gpu(cudaStream_t &stream);
 __global__ static void add_gpu_kernel(double* u_device,  
 		double* rhs_device);
-static void adi_gpu();
-static void compute_rhs_gpu();
+static void adi_gpu(cudaStream_t &stream);
+static void compute_rhs_gpu(cudaStream_t &stream);
 __global__ static void compute_rhs_gpu_kernel_1(double* rho_i_device, 
 		double* us_device, 
 		double* vs_device, 
@@ -289,8 +289,9 @@ static void set_constants();
 static void setup_gpu();
 static void verify(int no_time_steps, 
 		char* class_npb, 
-		boolean* verified);
-static void x_solve_gpu();
+		boolean* verified,
+		cudaStream_t &stream);
+static void x_solve_gpu(cudaStream_t &stream);
 __device__ static void x_solve_gpu_device_fjac(double fjac[5][5], 
 		double t_u[5], 
 		double rho_i,
@@ -313,7 +314,7 @@ __global__ static void x_solve_gpu_kernel_3(double* rhs_device,
 		double* lhsA_device, 
 		double* lhsB_device, 
 		double* lhsC_device);
-static void y_solve_gpu();
+static void y_solve_gpu(cudaStream_t &stream);
 __device__ static void y_solve_gpu_device_fjac(double fjac[5][5], 
 		double t_u[5],
 		double rho_i, 
@@ -336,7 +337,7 @@ __global__ static void y_solve_gpu_kernel_3(double* rhs_device,
 		double* lhsA_device, 
 		double* lhsB_device, 
 		double* lhsC_device);
-static void z_solve_gpu();
+static void z_solve_gpu(cudaStream_t &stream);
 __device__ static void z_solve_gpu_device_fjac(double l_fjac[5][5], 
 		double t_u[5],
 		double square, 
@@ -356,6 +357,9 @@ __global__ static void z_solve_gpu_kernel_3(double* rhs_device,
 		double* lhsA_device, 
 		double* lhsB_device,  
 		double* lhsC_device);
+
+cudaStream_t stream1;
+cudaStreamCaptureStatus stream_capture_or_not;
 
 /* bt */
 int main(int argc, char* argv[]){
@@ -452,7 +456,7 @@ int main(int argc, char* argv[]){
 	cudaMemcpy(u_device, u, size_u, cudaMemcpyHostToDevice);
 	cudaMemcpy(forcing_device, forcing, size_forcing, cudaMemcpyHostToDevice);
 
-	adi_gpu();
+	adi_gpu(stream1);
 
 	cudaMemcpy(qs, qs_device, size_qs, cudaMemcpyDeviceToHost);
 	cudaMemcpy(square, square_device, size_square, cudaMemcpyDeviceToHost);
@@ -471,7 +475,7 @@ int main(int argc, char* argv[]){
 
 	for(step=1; step<=niter; step++){
 		if((step%20)==0||step==1){printf(" Time step %4d\n",step);}
-		adi_gpu();
+		adi_gpu(stream1);
 	}
 
 	timer_stop();
@@ -480,7 +484,7 @@ int main(int argc, char* argv[]){
 	cudaMemcpy(rhs, rhs_device, size_rhs, cudaMemcpyDeviceToHost);
 	cudaMemcpy(u, u_device, size_u, cudaMemcpyDeviceToHost);
 
-	verify(niter, &class_npb, &verified);
+	verify(niter, &class_npb, &verified, stream1);
 
 	n3=1.0*grid_points[0]*grid_points[1]*grid_points[2];
 	navg=(grid_points[0]+grid_points[1]+grid_points[2])/3.0;
@@ -648,7 +652,7 @@ int main(int argc, char* argv[]){
  * addition of update to the vector u
  * ---------------------------------------------------------------------
  */
-void add_gpu(){
+void add_gpu(cudaStream_t &stream){
 	size_t amount_of_threads[3];
 	size_t amount_of_work[3];	
 
@@ -675,7 +679,7 @@ void add_gpu(){
 	add_gpu_kernel<<< 
 		blockSize, 
 		threadSize, 
-		0>>>(
+		0, stream>>>(
 				u_device,
 				rhs_device);	
 #if defined(PROFILING)
@@ -698,21 +702,52 @@ __global__ void add_gpu_kernel(double * u_device,
 	u_device[((k * (JMAXP+1) + j) * (IMAXP+1) + i) * 5 + m]	+= rhs_device[((k * (JMAXP+1) + j) * (IMAXP+1) + i) * 5 + m];
 }
 
-void adi_gpu(){
+void adi_gpu(cudaStream_t &stream){
+
+	static cudaGraph_t graph1;
+	static cudaGraphExec_t graphExec1;
+	static bool graphCreated1 = false;
+
+	if (!graphCreated1) {
+		printf("graphCreated1 = false\n");
+		cudaStreamCreate(&stream);
+
+		cudaStreamBeginCapture(stream, cudaStreamCaptureModeGlobal);	
+		cudaStreamIsCapturing(stream, &stream_capture_or_not);
+
+		if (stream_capture_or_not == cudaStreamCaptureStatusActive){
+			printf("This stream 1 is being captured\n");
+		}               
 	/*
 	 * ---------------------------------------------------------------------
 	 * compute the reciprocal of density, and the kinetic energy, 
 	 * and the speed of sound.
 	 * ---------------------------------------------------------------------
 	 */
-	compute_rhs_gpu();
-	x_solve_gpu();
-	y_solve_gpu();	
-	z_solve_gpu();	
-	add_gpu();	
+	compute_rhs_gpu(stream);
+	x_solve_gpu(stream);
+	y_solve_gpu(stream);	
+	z_solve_gpu(stream);	
+	add_gpu(stream);	
+
+	cudaStreamEndCapture(stream, &graph1);
+	cudaGraphInstantiate(&graphExec1, graph1, NULL, NULL, 0);
+	cudaGraphLaunch(graphExec1, stream);						
+
+	graphCreated1 = true;
+	
+	}
+
+	if (graphCreated1){
+	cudaGraphLaunch(graphExec1, stream);
+	cudaStreamSynchronize(stream);
+	// return graph1;
+	// cudaGraphDestroy(graph1);
+	// cudaGraphExecDestroy(graphExec1);
+	}
 }
 
-void compute_rhs_gpu(){
+void compute_rhs_gpu(cudaStream_t &stream){
 	int work_base = 0;
 	int work_num_item = min(PROBLEM_SIZE, grid_points[2] - work_base);
 	int copy_num_item = min(PROBLEM_SIZE, grid_points[2] - work_base);
@@ -745,7 +780,7 @@ void compute_rhs_gpu(){
 	compute_rhs_gpu_kernel_1<<< 
 		blockSize,
 		threadSize,
-		0>>>(
+		0, stream>>>(
 				rho_i_device, 
 				us_device, 
 				vs_device, 
@@ -788,7 +823,7 @@ void compute_rhs_gpu(){
 	compute_rhs_gpu_kernel_2<<< 
 		blockSize, 
 		threadSize, 
-		0>>>(
+		0, stream>>>(
 				rhs_device,
 				forcing_device);
 #if defined(PROFILING)
@@ -823,7 +858,7 @@ void compute_rhs_gpu(){
 	compute_rhs_gpu_kernel_3<<< 
 		blockSize, 
 		threadSize, 
-		0>>>(
+		0, stream>>>(
 				us_device, 
 				vs_device, 
 				ws_device, 
@@ -860,7 +895,7 @@ void compute_rhs_gpu(){
 	compute_rhs_gpu_kernel_4<<< 
 		blockSize, 
 		threadSize, 
-		0>>>(
+		0, stream>>>(
 				u_device,
 				rhs_device);	
 #if defined(PROFILING)
@@ -895,7 +930,7 @@ void compute_rhs_gpu(){
 	compute_rhs_gpu_kernel_5<<< 
 		blockSize, 
 		threadSize, 
-		0>>>(
+		0, stream>>>(
 				us_device, 
 				vs_device, 
 				ws_device, 
@@ -932,7 +967,7 @@ void compute_rhs_gpu(){
 	compute_rhs_gpu_kernel_6<<< 
 		blockSize, 
 		threadSize, 
-		0>>>(
+		0, stream>>>(
 				u_device,
 				rhs_device);	
 #if defined(PROFILING)
@@ -962,7 +997,7 @@ void compute_rhs_gpu(){
 	compute_rhs_gpu_kernel_7<<< 
 		blockSize, 
 		threadSize, 
-		0>>>(
+		0, stream>>>(
 				us_device, 
 				vs_device, 
 				ws_device, 
@@ -999,7 +1034,7 @@ void compute_rhs_gpu(){
 	compute_rhs_gpu_kernel_8<<< 
 		blockSize, 
 		threadSize, 
-		0>>>(
+		0, stream>>>(
 				u_device, 
 				rhs_device);	
 #if defined(PROFILING)
@@ -1030,7 +1065,7 @@ void compute_rhs_gpu(){
 	compute_rhs_gpu_kernel_9<<< 
 		blockSize, 
 		threadSize, 
-		0>>>(
+		0, stream>>>(
 				rhs_device);	
 #if defined(PROFILING)
 	timer_stop(PROFILING_RHS_9);
@@ -2728,10 +2763,16 @@ static void setup_gpu(){
  * verification routine                         
  * ---------------------------------------------------------------------
  */
-void verify(int no_time_steps, char *class_npb, boolean *verified){
+void verify(int no_time_steps, char *class_npb, boolean *verified, cudaStream_t &stream){
 	double xcrref[5], xceref[5], xcrdif[5], xcedif[5]; 
 	double epsilon, xce[5], xcr[5], dtref = 0.0;
 	int m;
+
+	static cudaGraph_t graph2;
+	static cudaGraphExec_t graphExec2;
+	static bool graphCreated2 = false;
+
+  
 
 	/*
 	 * ---------------------------------------------------------------------
@@ -2750,9 +2791,36 @@ void verify(int no_time_steps, char *class_npb, boolean *verified){
 	cudaMemcpy(u_device, u, sizeof(double) * KMAX * (JMAXP+1) * (IMAXP+1) * 5, cudaMemcpyHostToDevice);
 	cudaMemcpy(forcing_device, forcing, sizeof(double) * KMAX * (JMAXP+1) * (IMAXP+1) * 5, cudaMemcpyHostToDevice);
 
-	compute_rhs_gpu();
+	if (!graphCreated2) {
+	printf("graphCreated2 = false\n");
+	cudaStreamCreate(&stream);
 
-	cudaMemcpy(rhs, rhs_device, sizeof(double) * KMAX * (JMAXP+1) * (IMAXP+1) * 5, cudaMemcpyDeviceToHost);
+	cudaStreamBeginCapture(stream, cudaStreamCaptureModeGlobal);	
+	cudaStreamIsCapturing(stream, &stream_capture_or_not);
+
+	if (stream_capture_or_not == cudaStreamCaptureStatusActive){
+		printf("This stream 2 is being captured\n");
+	} 
+
+	compute_rhs_gpu(stream1);
+
+	cudaMemcpyAsync(rhs, rhs_device, sizeof(double) * KMAX * (JMAXP+1) * (IMAXP+1) * 5, cudaMemcpyDeviceToHost, stream);
+
+
+	cudaStreamEndCapture(stream, &graph2);
+	cudaGraphInstantiate(&graphExec2, graph2, NULL, NULL, 0);
+	cudaGraphLaunch(graphExec2, stream);						
+
+	graphCreated2 = true;
+	}
+
+	if (graphCreated2){
+		cudaGraphLaunch(graphExec2, stream);
+		cudaStreamSynchronize(stream);
+		// return graph1;
+		// cudaGraphDestroy(graph1);
+		// cudaGraphExecDestroy(graphExec1);
+	}
 
 	rhs_norm(xcr);
 
@@ -3105,7 +3173,7 @@ void verify(int no_time_steps, char *class_npb, boolean *verified){
  * of the sweep. 
  * ---------------------------------------------------------------------
  */
-void x_solve_gpu(){
+void x_solve_gpu(cudaStream_t &stream){
 	size_t amount_of_threads[3];
 	size_t amount_of_work[3]; 
 	/*
@@ -3134,7 +3202,7 @@ void x_solve_gpu(){
 	x_solve_gpu_kernel_1<<< 
 		blockSize, 
 		threadSize, 
-		0>>>(
+		0, stream>>>(
 				lhsA_device, 
 				lhsB_device, 
 				lhsC_device);
@@ -3165,7 +3233,7 @@ void x_solve_gpu(){
 	x_solve_gpu_kernel_2<<< 
 		blockSize, 
 		threadSize, 
-		0>>>(
+		0, stream>>>(
 				qs_device, 
 				rho_i_device, 
 				square_device, 
@@ -3201,7 +3269,7 @@ void x_solve_gpu(){
 	x_solve_gpu_kernel_3<<< 
 		blockSize, 
 		threadSize, 
-		sizeof(double)*max_amount_of_threads_j*(3*5*5+2*5)>>>(
+		sizeof(double)*max_amount_of_threads_j*(3*5*5+2*5), stream>>>(
 				rhs_device, 
 				lhsA_device, 
 				lhsB_device, 
@@ -3756,7 +3824,7 @@ __global__ void x_solve_gpu_kernel_3(double* rhs_device,
  * of the sweep.
  * ---------------------------------------------------------------------
  */
-void y_solve_gpu(){
+void y_solve_gpu(cudaStream_t &stream){
 	size_t amount_of_threads[3];
 	size_t amount_of_work[3]; 
 	/*
@@ -3788,7 +3856,7 @@ void y_solve_gpu(){
 	y_solve_gpu_kernel_1<<< 
 		blockSize, 
 		threadSize, 
-		0>>>(
+		0, stream>>>(
 				lhsA_device, 
 				lhsB_device, 
 				lhsC_device);
@@ -3819,7 +3887,7 @@ void y_solve_gpu(){
 	y_solve_gpu_kernel_2<<< 
 		blockSize, 
 		threadSize, 
-		0>>>(
+		0, stream>>>(
 				qs_device, 
 				rho_i_device, 
 				square_device, 
@@ -3855,7 +3923,7 @@ void y_solve_gpu(){
 	y_solve_gpu_kernel_3<<< 
 		blockSize, 
 		threadSize,
-		sizeof(double)*max_amount_of_threads_i*(3*5*5+2*5)>>>(
+		sizeof(double)*max_amount_of_threads_i*(3*5*5+2*5), stream>>>(
 				rhs_device, 
 				lhsA_device, 
 				lhsB_device, 
@@ -4391,7 +4459,7 @@ __global__ void y_solve_gpu_kernel_3(double* rhs_device,
  * of the sweep.
  * ---------------------------------------------------------------------
  */
-void z_solve_gpu(){
+void z_solve_gpu(cudaStream_t &stream){
 	size_t amount_of_threads[3];
 	size_t amount_of_work[3];
 
@@ -4414,7 +4482,7 @@ void z_solve_gpu(){
 	z_solve_gpu_kernel_1<<< 
 		blockSize, 
 		threadSize, 
-		0>>>(
+		0, stream>>>(
 				lhsA_device, 
 				lhsB_device, 
 				lhsC_device);
@@ -4445,7 +4513,7 @@ void z_solve_gpu(){
 	z_solve_gpu_kernel_2<<< 
 		blockSize, 
 		threadSize, 
-		0>>>(
+		0, stream>>>(
 				qs_device, 
 				square_device, 
 				u_device, 
@@ -4479,7 +4547,7 @@ void z_solve_gpu(){
 	z_solve_gpu_kernel_3<<< 
 		blockSize, 
 		threadSize, 
-		sizeof(double)*max_amount_of_threads_i*(3*5*5+2*5)>>>(
+		sizeof(double)*max_amount_of_threads_i*(3*5*5+2*5), stream>>>(
 				rhs_device, 
 				lhsA_device, 
 				lhsB_device, 

@@ -233,7 +233,7 @@ namespace constants_device{
 static void add_gpu(cudaStream_t &stream);
 __global__ static void add_gpu_kernel(double* u_device,  
 		double* rhs_device);
-static void adi_gpu(cudaStream_t &stream);
+static void adi_gpu(cudaStream_t &stream, cudaGraph_t &graph, cudaGraphExec_t &graphExec);
 static void compute_rhs_gpu(cudaStream_t &stream);
 __global__ static void compute_rhs_gpu_kernel_1(double* rho_i_device, 
 		double* us_device, 
@@ -290,7 +290,9 @@ static void setup_gpu();
 static void verify(int no_time_steps, 
 		char* class_npb, 
 		boolean* verified,
-		cudaStream_t &stream);
+		cudaStream_t &stream,
+		cudaGraph_t &graph, 
+		cudaGraphExec_t &graphExec);
 static void x_solve_gpu(cudaStream_t &stream);
 __device__ static void x_solve_gpu_device_fjac(double fjac[5][5], 
 		double t_u[5], 
@@ -360,6 +362,8 @@ __global__ static void z_solve_gpu_kernel_3(double* rhs_device,
 
 cudaStream_t stream1;
 cudaStreamCaptureStatus stream_capture_or_not;
+cudaGraph_t graph1, graph2;
+cudaGraphExec_t graphExec1, graphExec2;
 
 /* bt */
 int main(int argc, char* argv[]){
@@ -456,7 +460,7 @@ int main(int argc, char* argv[]){
 	cudaMemcpy(u_device, u, size_u, cudaMemcpyHostToDevice);
 	cudaMemcpy(forcing_device, forcing, size_forcing, cudaMemcpyHostToDevice);
 
-	adi_gpu(stream1);
+	adi_gpu(stream1, graph1, graphExec1);
 
 	cudaMemcpy(qs, qs_device, size_qs, cudaMemcpyDeviceToHost);
 	cudaMemcpy(square, square_device, size_square, cudaMemcpyDeviceToHost);
@@ -475,7 +479,7 @@ int main(int argc, char* argv[]){
 
 	for(step=1; step<=niter; step++){
 		if((step%20)==0||step==1){printf(" Time step %4d\n",step);}
-		adi_gpu(stream1);
+		adi_gpu(stream1, graph1, graphExec1);
 	}
 
 	timer_stop();
@@ -484,7 +488,7 @@ int main(int argc, char* argv[]){
 	cudaMemcpy(rhs, rhs_device, size_rhs, cudaMemcpyDeviceToHost);
 	cudaMemcpy(u, u_device, size_u, cudaMemcpyDeviceToHost);
 
-	verify(niter, &class_npb, &verified, stream1);
+	verify(niter, &class_npb, &verified, stream1, graph2, graphExec2);
 
 	n3=1.0*grid_points[0]*grid_points[1]*grid_points[2];
 	navg=(grid_points[0]+grid_points[1]+grid_points[2])/3.0;
@@ -640,7 +644,7 @@ int main(int argc, char* argv[]){
 			(char*)CS4,
 			(char*)CS5,
 			(char*)CS6,
-			(char*)"(none)");	
+			(char*)"(none)");		
 
 	release_gpu();
 
@@ -702,22 +706,21 @@ __global__ void add_gpu_kernel(double * u_device,
 	u_device[((k * (JMAXP+1) + j) * (IMAXP+1) + i) * 5 + m]	+= rhs_device[((k * (JMAXP+1) + j) * (IMAXP+1) + i) * 5 + m];
 }
 
-void adi_gpu(cudaStream_t &stream){
+void adi_gpu(cudaStream_t &stream, cudaGraph_t &graph, cudaGraphExec_t &graphExec){
 
-	static cudaGraph_t graph1;
-	static cudaGraphExec_t graphExec1;
+	// static cudaGraph_t graph1;
+	// static cudaGraphExec_t graphExec1;
 	static bool graphCreated1 = false;
 
 	if (!graphCreated1) {
-		printf("graphCreated1 = false\n");
 		cudaStreamCreate(&stream);
 
 		cudaStreamBeginCapture(stream, cudaStreamCaptureModeGlobal);	
 		cudaStreamIsCapturing(stream, &stream_capture_or_not);
 
-		if (stream_capture_or_not == cudaStreamCaptureStatusActive){
-			printf("This stream 1 is being captured\n");
-		}               
+		// if (stream_capture_or_not == cudaStreamCaptureStatusActive){
+		// 	printf("This stream 1 is being captured\n");
+		// }               
 	/*
 	 * ---------------------------------------------------------------------
 	 * compute the reciprocal of density, and the kinetic energy, 
@@ -731,8 +734,7 @@ void adi_gpu(cudaStream_t &stream){
 	add_gpu(stream);	
 
 	cudaStreamEndCapture(stream, &graph1);
-	cudaGraphInstantiate(&graphExec1, graph1, NULL, NULL, 0);
-	cudaGraphLaunch(graphExec1, stream);						
+	cudaGraphInstantiate(&graphExec1, graph1, NULL, NULL, 0);				
 
 	graphCreated1 = true;
 	
@@ -2106,6 +2108,12 @@ static void release_gpu(){
 	cudaFree(lhsA_device);
 	cudaFree(lhsB_device);
 	cudaFree(lhsC_device);
+	cudaStreamDestroy(stream1);
+	cudaGraphDestroy(graph1);
+	cudaGraphDestroy(graph2);
+
+	cudaGraphExecDestroy(graphExec1);
+	cudaGraphExecDestroy(graphExec2);	
 }
 
 void rhs_norm(double rms[5]){
@@ -2464,7 +2472,7 @@ static void setup_gpu(){
 	}
 	else if((GPU_DEVICE>=0)&&
 			(GPU_DEVICE<total_devices)){
-		gpu_device_id = GPU_DEVICE;
+		gpu_device_id = 0;
 	}
 	else{
 		gpu_device_id = 0;
@@ -2763,13 +2771,13 @@ static void setup_gpu(){
  * verification routine                         
  * ---------------------------------------------------------------------
  */
-void verify(int no_time_steps, char *class_npb, boolean *verified, cudaStream_t &stream){
+void verify(int no_time_steps, char *class_npb, boolean *verified, cudaStream_t &stream, cudaGraph_t &graph, cudaGraphExec_t &graphExec){
 	double xcrref[5], xceref[5], xcrdif[5], xcedif[5]; 
 	double epsilon, xce[5], xcr[5], dtref = 0.0;
 	int m;
 
-	static cudaGraph_t graph2;
-	static cudaGraphExec_t graphExec2;
+	// static cudaGraph_t graph2;
+	// static cudaGraphExec_t graphExec2;
 	static bool graphCreated2 = false;
 
   
@@ -2792,15 +2800,14 @@ void verify(int no_time_steps, char *class_npb, boolean *verified, cudaStream_t 
 	cudaMemcpy(forcing_device, forcing, sizeof(double) * KMAX * (JMAXP+1) * (IMAXP+1) * 5, cudaMemcpyHostToDevice);
 
 	if (!graphCreated2) {
-	printf("graphCreated2 = false\n");
 	cudaStreamCreate(&stream);
 
 	cudaStreamBeginCapture(stream, cudaStreamCaptureModeGlobal);	
 	cudaStreamIsCapturing(stream, &stream_capture_or_not);
 
-	if (stream_capture_or_not == cudaStreamCaptureStatusActive){
-		printf("This stream 2 is being captured\n");
-	} 
+	// if (stream_capture_or_not == cudaStreamCaptureStatusActive){
+	// 	printf("This stream 2 is being captured\n");
+	// } 
 
 	compute_rhs_gpu(stream1);
 
@@ -2808,8 +2815,7 @@ void verify(int no_time_steps, char *class_npb, boolean *verified, cudaStream_t 
 
 
 	cudaStreamEndCapture(stream, &graph2);
-	cudaGraphInstantiate(&graphExec2, graph2, NULL, NULL, 0);
-	cudaGraphLaunch(graphExec2, stream);						
+	cudaGraphInstantiate(&graphExec2, graph2, NULL, NULL, 0);					
 
 	graphCreated2 = true;
 	}

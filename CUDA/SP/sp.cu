@@ -224,7 +224,7 @@ __global__ static void add_gpu_kernel(double* u,
 		const int nx, 
 		const int ny, 
 		const int nz);
-static void adi_gpu(cudaStream_t &stream);
+static void adi_gpu(cudaStream_t &stream, cudaGraph_t &graph, cudaGraphExec_t &graphExec);
 static void compute_rhs_gpu(cudaStream_t &stream);
 __global__ static void compute_rhs_gpu_kernel_1(double* rho_i, 
 		double* us, 
@@ -259,7 +259,7 @@ __global__ static void error_norm_gpu_kernel_2(double* rms,
 		const int nx,
 		const int ny,
 		const int nz);	
-static void exact_rhs_gpu(cudaStream_t &stream);	
+static void exact_rhs_gpu(cudaStream_t &stream, cudaGraph_t &graph, cudaGraphExec_t &graphExec);	
 __global__ static void exact_rhs_gpu_kernel_1(double* forcing, 
 		const int nx,
 		const int ny,
@@ -280,7 +280,7 @@ __device__ static void exact_solution_gpu_device(const double xi,
 		const double eta,
 		const double zeta,
 		double* dtemp);		
-static void initialize_gpu(cudaStream_t &stream);
+static void initialize_gpu(cudaStream_t &stream, cudaGraph_t &graph, cudaGraphExec_t &graphExec);
 __global__ static void initialize_gpu_kernel(double* u,
 		const int nx,
 		const int ny,
@@ -312,7 +312,9 @@ __global__ static void txinvr_gpu_kernel(const double* rho_i,
 static void verify_gpu(int no_time_steps,
 		char* class_npb,
 		boolean* verified,
-		cudaStream_t &stream);
+		cudaStream_t &stream,
+		cudaGraph_t &graph, 
+		cudaGraphExec_t &graphExec);
 static void x_solve_gpu(cudaStream_t &stream);
 __global__ static void x_solve_gpu_kernel(const double* rho_i, 
 		const double* us, 
@@ -351,6 +353,9 @@ __global__ static void z_solve_gpu_kernel(const double* rho_i,
 
 cudaStream_t stream1;
 cudaStreamCaptureStatus stream_capture_or_not;
+
+cudaGraph_t graph1, graph2, graph3, graph4;
+cudaGraphExec_t graphExec1, graphExec2, graphExec3, graphExec4;
 
 /* sp */
 int main(int argc, char** argv){
@@ -425,17 +430,17 @@ int main(int argc, char** argv){
 #endif
 
 
-	exact_rhs_gpu(stream1);
+	exact_rhs_gpu(stream1, graph1, graphExec1);
 
-	initialize_gpu(stream1);
+	initialize_gpu(stream1, graph2, graphExec2);
 	/*
 	 * ---------------------------------------------------------------------
 	 * do one time step to touch all code, and reinitialize
 	 * ---------------------------------------------------------------------
 	 */
-	adi_gpu(stream1);
+	adi_gpu(stream1, graph3, graphExec3);
 
-	initialize_gpu(stream1);
+	initialize_gpu(stream1, graph2, graphExec2);
 	timer_clear(PROFILING_TOTAL_TIME);
 #if defined(PROFILING)
 	timer_clear(PROFILING_ADD);
@@ -459,12 +464,12 @@ int main(int argc, char** argv){
 
 	for(step=1;step<=niter;step++){
 		if((step%20)==0||step==1){printf(" Time step %4d\n",step);}
-		adi_gpu(stream1);
+		adi_gpu(stream1, graph3, graphExec3);
 	}
 
 	timer_stop(PROFILING_TOTAL_TIME);/*#stop_timer*/
 	tmax=timer_read(PROFILING_TOTAL_TIME);
-	verify_gpu(niter, &class_npb, &verified, stream1);
+	verify_gpu(niter, &class_npb, &verified, stream1, graph4, graphExec4);
 	if(tmax!=0.0){
 		n3=grid_points[0]*grid_points[1]*grid_points[2];
 		t=(grid_points[0]+grid_points[1]+grid_points[2])/3.0;
@@ -572,9 +577,10 @@ int main(int argc, char** argv){
 			(char*)CS5,
 			(char*)CS6,
 			(char*)"(none)");
+
 	release_gpu();
 	return 0;
-	cudaStreamDestroy(stream1);
+
 }
 
 /*
@@ -634,22 +640,18 @@ __global__ static void add_gpu_kernel(double* u,
 	u(4,i,j,k)+=rhs(4,i,j,k);
 }
 
-static void adi_gpu(cudaStream_t &stream){
-
-	static cudaGraph_t graph3;
-	static cudaGraphExec_t graphExec3;
+static void adi_gpu(cudaStream_t &stream, cudaGraph_t &graph, cudaGraphExec_t &graphExec){
 	static bool graphCreated3 = false;
 
 	if (!graphCreated3) {
-		printf("graphCreated3 = false\n");
 		cudaStreamCreate(&stream);
 
 		cudaStreamBeginCapture(stream, cudaStreamCaptureModeGlobal);	
-		cudaStreamIsCapturing(stream, &stream_capture_or_not);
+		// cudaStreamIsCapturing(stream, &stream_capture_or_not);
 
-		if (stream_capture_or_not == cudaStreamCaptureStatusActive){
-			printf("This stream 1 is being captured\n");
-		}
+		// if (stream_capture_or_not == cudaStreamCaptureStatusActive){
+		// 	printf("This stream 3 is being captured\n");
+		// }
 
 			compute_rhs_gpu(stream);
 			txinvr_gpu(stream);
@@ -658,19 +660,15 @@ static void adi_gpu(cudaStream_t &stream){
 			z_solve_gpu(stream);
 			add_gpu(stream);
 
-		cudaStreamEndCapture(stream, &graph3);
-		cudaGraphInstantiate(&graphExec3, graph3, NULL, NULL, 0);
-		cudaGraphLaunch(graphExec3, stream);						
+		cudaStreamEndCapture(stream, &graph);
+		cudaGraphInstantiate(&graphExec, graph, NULL, NULL, 0);						
 
 		graphCreated3 = true;
 	}
 
 	if (graphCreated3){
-		cudaGraphLaunch(graphExec3, stream);
+		cudaGraphLaunch(graphExec, stream);
 		cudaStreamSynchronize(stream);
-		// return graph1;
-		// cudaGraphDestroy(graph1);
-		// cudaGraphExecDestroy(graphExec1);
 	}
 }
 
@@ -1013,10 +1011,7 @@ __global__ static void error_norm_gpu_kernel_2(double* rms,
  * compute the right hand side based on exact solution
  * ---------------------------------------------------------------------
  */
-static void exact_rhs_gpu(cudaStream_t &stream){
-
-	static cudaGraph_t graph1;
-	static cudaGraphExec_t graphExec1;
+static void exact_rhs_gpu(cudaStream_t &stream, cudaGraph_t &graph, cudaGraphExec_t &graphExec){
 	static bool graphCreated1 = false;
 
 #if defined(PROFILING)
@@ -1028,15 +1023,14 @@ static void exact_rhs_gpu(cudaStream_t &stream){
 	int rhs1_blocks_per_grid = (ceil((double)rhs1_workload/(double)rhs1_threads_per_block));
 
 	if (!graphCreated1) {
-		printf("graphCreated1 = false\n");
 		cudaStreamCreate(&stream);
 
 		cudaStreamBeginCapture(stream, cudaStreamCaptureModeGlobal);	
-		cudaStreamIsCapturing(stream, &stream_capture_or_not);
+		// cudaStreamIsCapturing(stream, &stream_capture_or_not);
 
-		if (stream_capture_or_not == cudaStreamCaptureStatusActive){
-			printf("This stream 1 is being captured\n");
-		}
+		// if (stream_capture_or_not == cudaStreamCaptureStatusActive){
+		// 	printf("This stream 1 is being captured\n");
+		// }
 			
 		exact_rhs_gpu_kernel_1<<<
 				rhs1_blocks_per_grid,
@@ -1123,19 +1117,15 @@ static void exact_rhs_gpu(cudaStream_t &stream){
 						ny, 
 						nz);
 
-		cudaStreamEndCapture(stream, &graph1);
-		cudaGraphInstantiate(&graphExec1, graph1, NULL, NULL, 0);
-		cudaGraphLaunch(graphExec1, stream);						
+		cudaStreamEndCapture(stream, &graph);
+		cudaGraphInstantiate(&graphExec, graph, NULL, NULL, 0);			
 
 		graphCreated1 = true;
 	}
 
 	if (graphCreated1){
-		cudaGraphLaunch(graphExec1, stream);
+		cudaGraphLaunch(graphExec, stream);
 		cudaStreamSynchronize(stream);
-		// return graph1;
-		// cudaGraphDestroy(graph1);
-		// cudaGraphExecDestroy(graphExec1);
 	}
 
 		#if defined(PROFILING)
@@ -1452,10 +1442,8 @@ __device__ static void exact_solution_gpu_device(const double xi,
  * tri-linear transfinite interpolation of the boundary values     
  * ---------------------------------------------------------------------
  */
-static void initialize_gpu(cudaStream_t &stream){
+static void initialize_gpu(cudaStream_t &stream, cudaGraph_t &graph, cudaGraphExec_t &graphExec){
 
-	static cudaGraph_t graph2;
-	static cudaGraphExec_t graphExec2;
 	static bool graphCreated2 = false;
 
 #if defined(PROFILING)
@@ -1463,15 +1451,14 @@ static void initialize_gpu(cudaStream_t &stream){
 #endif
 
 if (!graphCreated2) {
-		printf("graphCreated2 = false\n");
 		cudaStreamCreate(&stream);
 
 		cudaStreamBeginCapture(stream, cudaStreamCaptureModeGlobal);	
-		cudaStreamIsCapturing(stream, &stream_capture_or_not);
+		// cudaStreamIsCapturing(stream, &stream_capture_or_not);
 
-		if (stream_capture_or_not == cudaStreamCaptureStatusActive){
-			printf("This stream 2 is being captured\n");
-		}
+		// if (stream_capture_or_not == cudaStreamCaptureStatusActive){
+		// 	printf("This stream 2 is being captured\n");
+		// }
 
 	/* #KERNEL INITIALIZE */
 		int initialize_threads_per_block;
@@ -1493,19 +1480,15 @@ if (!graphCreated2) {
 #if defined(PROFILING)
 	timer_stop(PROFILING_INITIALIZE);
 #endif
-		cudaStreamEndCapture(stream, &graph2);
-		cudaGraphInstantiate(&graphExec2, graph2, NULL, NULL, 0);
-		cudaGraphLaunch(graphExec2, stream);						
+		cudaStreamEndCapture(stream, &graph);
+		cudaGraphInstantiate(&graphExec, graph, NULL, NULL, 0);					
 
 		graphCreated2 = true;
 	}
 
 	if (graphCreated2){
-		cudaGraphLaunch(graphExec2, stream);
+		cudaGraphLaunch(graphExec, stream);
 		cudaStreamSynchronize(stream);
-		// return graph1;
-		// cudaGraphDestroy(graph1);
-		// cudaGraphExecDestroy(graphExec1);
 	}
 }
 
@@ -1645,6 +1628,17 @@ static void release_gpu(){
 	cudaFree(lhs_device);
 	cudaFree(rhs_buffer_device);
 	cudaFree(rms_buffer_device);
+
+	cudaStreamDestroy(stream1);	
+	cudaGraphDestroy(graph1);
+	cudaGraphDestroy(graph2);	
+	cudaGraphDestroy(graph3);	
+	cudaGraphDestroy(graph4);		
+
+	cudaGraphExecDestroy(graphExec1);
+	cudaGraphExecDestroy(graphExec2);	
+	cudaGraphExecDestroy(graphExec3);		
+	cudaGraphExecDestroy(graphExec4);		
 }
 
 static void rhs_norm_gpu(double rms[], cudaStream_t &stream){
@@ -2065,7 +2059,9 @@ static void setup_gpu(){
 		exit(-1);
 	}else if((GPU_DEVICE>=0)&&
 			(GPU_DEVICE<total_devices)){
-		gpu_device_id = GPU_DEVICE;
+		// gpu_device_id = GPU_DEVICE;
+			gpu_device_id = 0;
+
 	}else{
 		gpu_device_id = 0;
 	}
@@ -2300,10 +2296,10 @@ __global__ static void txinvr_gpu_kernel(const double* rho_i,
 static void verify_gpu(int no_time_steps,
 		char* class_npb,
 		boolean* verified,
-		cudaStream_t &stream){
+		cudaStream_t &stream,
+		cudaGraph_t &graph, 
+		cudaGraphExec_t &graphExec){
 
-	static cudaGraph_t graph4;
-	static cudaGraphExec_t graphExec4;
 	static bool graphCreated4 = false;
 
 	double dt=dt_host;
@@ -2321,15 +2317,14 @@ static void verify_gpu(int no_time_steps,
 	 * ---------------------------------------------------------------------
 	 */
 	if (!graphCreated4) {
-		printf("graphCreated4 = false\n");
 		cudaStreamCreate(&stream);
 
 		cudaStreamBeginCapture(stream, cudaStreamCaptureModeGlobal);	
-		cudaStreamIsCapturing(stream, &stream_capture_or_not);
+		// cudaStreamIsCapturing(stream, &stream_capture_or_not);
 
-		if (stream_capture_or_not == cudaStreamCaptureStatusActive){
-			printf("This stream 1 is being captured\n");
-		}
+		// if (stream_capture_or_not == cudaStreamCaptureStatusActive){
+		// 	printf("This stream 1 is being captured\n");
+		// }
 
 		error_norm_gpu(xce, stream);
 
@@ -2339,19 +2334,15 @@ static void verify_gpu(int no_time_steps,
 
 		rhs_norm_gpu(xcr, stream);
 
-		cudaStreamEndCapture(stream, &graph4);
-		cudaGraphInstantiate(&graphExec4, graph4, NULL, NULL, 0);
-		cudaGraphLaunch(graphExec4, stream);						
+		cudaStreamEndCapture(stream, &graph);
+		cudaGraphInstantiate(&graphExec, graph, NULL, NULL, 0);					
 
 		graphCreated4 = true;
 	}
 
 	if (graphCreated4){
-		cudaGraphLaunch(graphExec4, stream);
+		cudaGraphLaunch(graphExec, stream);
 		cudaStreamSynchronize(stream);
-		// return graph1;
-		// cudaGraphDestroy(graph1);
-		// cudaGraphExecDestroy(graphExec1);
 	}
 
 	for(m=0;m<5;m++){xcr[m]=xcr[m]/dt;}

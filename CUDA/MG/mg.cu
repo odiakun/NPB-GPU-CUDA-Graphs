@@ -151,7 +151,8 @@ static void comm3_gpu(double* u_device,
 		int n1, 
 		int n2, 
 		int n3, 
-		int kk);
+		int kk,
+		cudaStream_t &stream);
 __global__ void comm3_gpu_kernel_1(double* u, 
 		int n1, 
 		int n2, 
@@ -183,7 +184,8 @@ static void interp_gpu(double* z_device,
 		int n1, 
 		int n2, 
 		int n3, 
-		int k);
+		int k,
+		cudaStream_t &stream);
 __global__ void interp_gpu_kernel(double* z_device,
 		double* u_device,
 		int mm1, 
@@ -210,7 +212,8 @@ static void mg3P_gpu(double* u_device,
 		int n1, 
 		int n2, 
 		int n3, 
-		int k);
+		int k,
+		cudaStream_t &stream);
 static void norm2u3(void* pointer_r, 
 		int n1, 
 		int n2, 
@@ -228,7 +231,10 @@ static void norm2u3_gpu(double* r_device,
 		double* rnmu, 
 		int nx, 
 		int ny, 
-		int nz);
+		int nz,
+		cudaStream_t &stream,
+		cudaGraph_t &graph, 
+		cudaGraphExec_t &graphExec);
 __global__ void norm2u3_gpu_kernel(double* r,
 		const int n1, 
 		const int n2, 
@@ -252,7 +258,8 @@ static void psinv_gpu(double* r_device,
 		int n2, 
 		int n3, 
 		double* c_device, 
-		int k);
+		int k,
+		cudaStream_t &stream);
 __global__ void psinv_gpu_kernel(double* r,
 		double* u,
 		double* c,
@@ -282,7 +289,8 @@ static void resid_gpu(double* u_device,
 		int n2,
 		int n3,
 		double* a_device,
-		int k);
+		int k,
+		cudaStream_t &stream);
 __global__ void resid_gpu_kernel(double* r,
 		double* u,
 		double* v,
@@ -308,7 +316,8 @@ static void rprj3_gpu(double* r_device,
 		int m1j, 
 		int m2j, 
 		int m3j, 
-		int k);
+		int k,
+		cudaStream_t &stream);
 __global__ void rprj3_gpu_kernel(double* r_device,
 		double* s_device,
 		int m1k,
@@ -334,7 +343,8 @@ static void showall(void* pointer_z,
 static void zero3_gpu(double* z_device, 
 		int n1, 
 		int n2, 
-		int n3);
+		int n3,
+		cudaStream_t &stream);
 __global__ void zero3_gpu_kernel(double* z, 
 		int n1, 
 		int n2, 
@@ -351,6 +361,11 @@ static void zran3(void* pointer_z,
 		int nx, 
 		int ny, 
 		int k);
+
+
+cudaStream_t stream1;
+cudaGraph_t graph1, graph2, graph3, graph4, graph4_1, graph4_2, graph5;
+cudaGraphExec_t graphExec1, graphExec2, graphExec3, graphExec4, graphExec4_2, graphExec5;		
 
 /* mg */
 int main(int argc, char** argv){
@@ -491,13 +506,50 @@ int main(int argc, char** argv){
 
 	timer_start(PROFILING_TOTAL_TIME);
 
-	resid_gpu(u_device,v_device,r_device,n1,n2,n3,a_device,k);	
-	norm2u3_gpu(r_device,n1,n2,n3,&rnm2,&rnmu,nx[lt],ny[lt],nz[lt]);
-	for(it = 1; it <= nit; it++){
-		mg3P_gpu(u_device,v_device,r_device,a_device,c_device,n1,n2,n3,k);
-		resid_gpu(u_device,v_device,r_device,n1,n2,n3,a_device,k);
+	static bool graphCreated1 = false;
+	if (!graphCreated1){
+
+		cudaStreamCreate(&stream1);
+		cudaStreamBeginCapture(stream1, cudaStreamCaptureModeGlobal);
+
+		resid_gpu(u_device,v_device,r_device,n1,n2,n3,a_device,k, stream1);					
+
+		cudaStreamEndCapture(stream1, &graph1);
+		cudaGraphInstantiate(&graphExec1, graph1, NULL, NULL, 0);
+
+		graphCreated1 = true;
 	}
-	norm2u3_gpu(r_device,n1,n2,n3,&rnm2,&rnmu,nx[lt],ny[lt],nz[lt]);
+
+	if (graphCreated1){
+		cudaGraphLaunch(graphExec1, stream1);
+		cudaStreamSynchronize(stream1);	
+	}		
+
+
+		norm2u3_gpu(r_device,n1,n2,n3,&rnm2,&rnmu,nx[lt],ny[lt],nz[lt], stream1, graph2, graphExec2);
+
+		static bool graphCreated3 = false;
+		if (!graphCreated3) {
+
+		cudaStreamBeginCapture(stream1, cudaStreamCaptureModeGlobal);
+
+		for(it = 1; it <= nit; it++){
+			mg3P_gpu(u_device,v_device,r_device,a_device,c_device,n1,n2,n3,k, stream1);
+			resid_gpu(u_device,v_device,r_device,n1,n2,n3,a_device,k, stream1);
+		}
+
+		cudaStreamEndCapture(stream1, &graph3);
+		cudaGraphInstantiate(&graphExec3, graph3, NULL, NULL, 0);
+
+		graphCreated1 = true;
+	}
+	if (graphCreated1){
+		cudaGraphLaunch(graphExec3, stream1);
+		cudaStreamSynchronize(stream1);	
+	}
+
+		norm2u3_gpu(r_device,n1,n2,n3,&rnm2,&rnmu,nx[lt],ny[lt],nz[lt], stream1, graph2, graphExec2);	
+
 
 	timer_stop(PROFILING_TOTAL_TIME);
 	t = timer_read(PROFILING_TOTAL_TIME);  	
@@ -719,7 +771,8 @@ static void comm3_gpu(double* u_device,
 		int n1, 
 		int n2, 
 		int n3, 
-		int kk){
+		int kk,
+		cudaStream_t &stream){
 #if defined(PROFILING)
 	timer_start(PROFILING_COMM3);
 #endif
@@ -736,7 +789,7 @@ static void comm3_gpu(double* u_device,
 			ceil(double(amount_of_work_y)/double(threadsPerBlock.y)),
 			1);
 	comm3_gpu_kernel_1<<<blocksPerGrid,
-		threadsPerBlock>>>(u_device,
+		threadsPerBlock, 0, stream>>>(u_device,
 				n1,
 				n2,
 				n3,
@@ -752,7 +805,7 @@ static void comm3_gpu(double* u_device,
 	blocksPerGrid.x=ceil(double(amount_of_work_x)/double(threadsPerBlock.x));
 	blocksPerGrid.y=ceil(double(amount_of_work_y)/double(threadsPerBlock.y));
 	comm3_gpu_kernel_2<<<blocksPerGrid,	
-		threadsPerBlock>>>(u_device,
+		threadsPerBlock, 0, stream>>>(u_device,
 				n1,
 				n2,
 				n3,
@@ -768,7 +821,7 @@ static void comm3_gpu(double* u_device,
 	blocksPerGrid.x=ceil(double(amount_of_work_x) / double(threadsPerBlock.x));
 	blocksPerGrid.y=ceil(double(amount_of_work_y) / double(threadsPerBlock.y));
 	comm3_gpu_kernel_3<<<blocksPerGrid,
-		threadsPerBlock>>>(u_device,
+		threadsPerBlock, 0, stream>>>(u_device,
 				n1,
 				n2,
 				n3,
@@ -991,7 +1044,8 @@ static void interp_gpu(double* z_device,
 		int n1, 
 		int n2, 
 		int n3, 
-		int k){
+		int k,
+		cudaStream_t &stream){
 #if defined(PROFILING)
 	timer_start(PROFILING_INTERP);
 #endif
@@ -1015,7 +1069,7 @@ static void interp_gpu(double* z_device,
 				1);
 		interp_gpu_kernel<<<blocksPerGrid, 
 			threadsPerBlock,
-			size_shared_data_on_interp>>>(
+			size_shared_data_on_interp, stream>>>(
 					z_device,
 					u_device,
 					mm1,
@@ -1140,7 +1194,8 @@ static void mg3P_gpu(double* u_device,
 		int n1, 
 		int n2, 
 		int n3, 
-		int k){
+		int k,
+		cudaStream_t &stream){
 	int j;
 	/*
 	 * --------------------------------------------------------------------
@@ -1150,7 +1205,7 @@ static void mg3P_gpu(double* u_device,
 	 */
 	for(k = lt; k >= lb+1; k--){
 		j = k-1;
-		rprj3_gpu(r_device+ir[k], m1[k], m2[k], m3[k], r_device+ir[j], m1[j], m2[j], m3[j],	k);
+		rprj3_gpu(r_device+ir[k], m1[k], m2[k], m3[k], r_device+ir[j], m1[j], m2[j], m3[j],	k, stream);
 	}
 	k = lb;
 	/*
@@ -1158,8 +1213,8 @@ static void mg3P_gpu(double* u_device,
 	 * compute an approximate solution on the coarsest grid
 	 * --------------------------------------------------------------------
 	 */
-	zero3_gpu(u_device+ir[k], m1[k], m2[k], m3[k]);
-	psinv_gpu(r_device+ir[k], u_device+ir[k], m1[k], m2[k], m3[k], c_device, k);
+	zero3_gpu(u_device+ir[k], m1[k], m2[k], m3[k], stream);
+	psinv_gpu(r_device+ir[k], u_device+ir[k], m1[k], m2[k], m3[k], c_device, k, stream);
 	for(k = lb+1; k <= lt-1; k++){
 		j = k-1;
 		/*
@@ -1167,26 +1222,26 @@ static void mg3P_gpu(double* u_device,
 		 * prolongate from level k-1  to k
 		 * -------------------------------------------------------------------
 		 */
-		zero3_gpu(u_device+ir[k], m1[k], m2[k], m3[k]);
-		interp_gpu(u_device+ir[j], m1[j], m2[j], m3[j], u_device+ir[k], m1[k], m2[k], m3[k], k);
+		zero3_gpu(u_device+ir[k], m1[k], m2[k], m3[k], stream);
+		interp_gpu(u_device+ir[j], m1[j], m2[j], m3[j], u_device+ir[k], m1[k], m2[k], m3[k], k, stream);
 		/*
 		 * --------------------------------------------------------------------
 		 * compute residual for level k
 		 * --------------------------------------------------------------------
 		 */
-		resid_gpu(u_device+ir[k], r_device+ir[k], r_device+ir[k], m1[k], m2[k], m3[k], a_device, k);
+		resid_gpu(u_device+ir[k], r_device+ir[k], r_device+ir[k], m1[k], m2[k], m3[k], a_device, k, stream);
 		/*
 		 * --------------------------------------------------------------------
 		 * apply smoother
 		 * --------------------------------------------------------------------
 		 */
-		psinv_gpu(r_device+ir[k], u_device+ir[k], m1[k], m2[k], m3[k], c_device, k);
+		psinv_gpu(r_device+ir[k], u_device+ir[k], m1[k], m2[k], m3[k], c_device, k, stream);
 	}
 	j = lt - 1; 
 	k = lt;
-	interp_gpu(u_device+ir[j], m1[j], m2[j], m3[j], u_device, n1, n2, n3, k);	
-	resid_gpu(u_device, v_device, r_device, n1, n2, n3, a_device, k);
-	psinv_gpu(r_device, u_device, n1, n2, n3, c_device, k);
+	interp_gpu(u_device+ir[j], m1[j], m2[j], m3[j], u_device, n1, n2, n3, k, stream);	
+	resid_gpu(u_device, v_device, r_device, n1, n2, n3, a_device, k, stream);
+	psinv_gpu(r_device, u_device, n1, n2, n3, c_device, k, stream);
 }
 
 /*
@@ -1239,7 +1294,13 @@ static void norm2u3_gpu(double* r_device,
 		double* rnmu, 
 		int nx, 
 		int ny, 
-		int nz){
+		int nz,
+		cudaStream_t &stream,
+		cudaGraph_t &graph, 
+		cudaGraphExec_t &graphExec){
+
+static bool graphCreated2 = false;
+
 #if defined(PROFILING)
 	timer_start(PROFILING_NORM2U3);
 #endif
@@ -1272,9 +1333,15 @@ static void norm2u3_gpu(double* r_device,
 	sum_device=data_device;
 	max_device=data_device+temp_size;
 
+	
+if (!graphCreated2) {
+
+	cudaStreamCreate(&stream);
+	cudaStreamBeginCapture(stream, cudaStreamCaptureModeGlobal);
+
 	norm2u3_gpu_kernel<<<blocksPerGrid, 
 		threadsPerBlock,
-		size_shared_data_on_norm2u3>>>(
+		size_shared_data_on_norm2u3, stream>>>(
 				r_device,
 				n1,
 				n2,
@@ -1283,6 +1350,16 @@ static void norm2u3_gpu(double* r_device,
 				max_device,
 				blocksPerGrid.x,
 				amount_of_work_x);
+
+	cudaStreamEndCapture(stream, &graph);
+	cudaGraphInstantiate(&graphExec, graph, NULL, NULL, 0);
+
+	graphCreated2 = true;
+}
+if (graphCreated2){
+	cudaGraphLaunch(graphExec, stream);
+	cudaStreamSynchronize(stream);	
+}				
 
 	data_host=(double*)malloc(2*temp_size*sizeof(double));
 	cudaMemcpy(data_host, data_device, 2*temp_size*sizeof(double), cudaMemcpyDeviceToHost);
@@ -1452,7 +1529,8 @@ static void psinv_gpu(double* r_device,
 		int n2, 
 		int n3, 
 		double* c_device, 
-		int k){
+		int k,
+		cudaStream_t &stream){
 #if defined(PROFILING)
 	timer_start(PROFILING_PSINV);
 #endif
@@ -1471,7 +1549,7 @@ static void psinv_gpu(double* r_device,
 
 	psinv_gpu_kernel<<<blocksPerGrid, 
 		threadsPerBlock,
-		size_shared_data_on_psinv>>>(
+		size_shared_data_on_psinv, stream>>>(
 				r_device,
 				u_device,
 				c_device,
@@ -1489,7 +1567,7 @@ static void psinv_gpu(double* r_device,
 	 * exchange boundary points
 	 * --------------------------------------------------------------------
 	 */
-	comm3_gpu(u_device,n1,n2,n3,k);
+	comm3_gpu(u_device,n1,n2,n3,k, stream);
 }
 
 __global__ void psinv_gpu_kernel(double* r,
@@ -1632,7 +1710,8 @@ static void resid_gpu(double* u_device,
 		int n2,
 		int n3,
 		double* a_device,
-		int k){
+		int k,
+		cudaStream_t &stream){
 #if defined(PROFILING)
 	timer_start(PROFILING_RESID);
 #endif
@@ -1651,7 +1730,7 @@ static void resid_gpu(double* u_device,
 
 	resid_gpu_kernel<<<blocksPerGrid, 
 		threadsPerBlock,
-		size_shared_data_on_resid>>>(
+		size_shared_data_on_resid, stream>>>(
 				u_device,
 				v_device,
 				r_device,
@@ -1670,7 +1749,7 @@ static void resid_gpu(double* u_device,
 	 * exchange boundary data
 	 * --------------------------------------------------------------------
 	 */
-	comm3_gpu(r_device,n1,n2,n3,k);
+	comm3_gpu(r_device, n1, n2, n3, k, stream);
 }
 
 __global__ void resid_gpu_kernel(double* u,
@@ -1798,7 +1877,8 @@ static void rprj3_gpu(double* r_device,
 		int m1j, 
 		int m2j, 
 		int m3j, 
-		int k){
+		int k,
+		cudaStream_t &stream){
 #if defined(PROFILING)
 	timer_start(PROFILING_RPRJ3);
 #endif
@@ -1840,7 +1920,7 @@ static void rprj3_gpu(double* r_device,
 
 	rprj3_gpu_kernel<<<blocksPerGrid, 
 		threadsPerBlock,
-		size_shared_data_on_rprj3>>>(
+		size_shared_data_on_rprj3, stream>>>(
 				r_device,
 				s_device,
 				m1k,
@@ -1859,7 +1939,7 @@ static void rprj3_gpu(double* r_device,
 #endif
 
 	j=k-1;
-	comm3_gpu(s_device,m1j,m2j,m3j,j);
+	comm3_gpu(s_device,m1j,m2j,m3j,j, stream);
 }
 
 __global__ void rprj3_gpu_kernel(double* r_device,
@@ -2134,7 +2214,8 @@ static void zero3(void* pointer_z,
 static void zero3_gpu(double* z_device, 
 		int n1, 
 		int n2, 
-		int n3){
+		int n3,
+		cudaStream_t &stream){
 #if defined(PROFILING)
 	timer_start(PROFILING_ZERO3);
 #endif
@@ -2143,7 +2224,7 @@ static void zero3_gpu(double* z_device,
 	int amount_of_work = n1*n2*n3;	
 	int blocks_per_grid = (ceil((double)(amount_of_work)/(double)(threads_per_block)));
 
-	zero3_gpu_kernel<<<blocks_per_grid, threads_per_block>>>(z_device,
+	zero3_gpu_kernel<<<blocks_per_grid, threads_per_block, 0, stream>>>(z_device,
 			n1,
 			n2,
 			n3,

@@ -107,8 +107,8 @@ void c_print_results(char* name,
 				}
 			}	
 			printf(" Iterations      =             %12d\n", niter); 
-			printf(" Time in seconds =             %12.2f\n", t);
-			printf(" Mop/s total     =             %12.2f\n", mops);
+			printf(" Time in seconds =             %12.10f\n", t);
+			printf(" Mop/s total     =             %12.10f\n", mops);
 			printf(" Operation type  = %24s\n", optype);
 			if(passed_verification < 0){
 				printf( " Verification    =            NOT PERFORMED\n");

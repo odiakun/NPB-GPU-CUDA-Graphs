@@ -266,7 +266,10 @@ extern __shared__ INT_TYPE extern_share_data[];
 
 /* function declarations */
 static void create_seq_gpu(double seed, 
-		double a);
+		double a,
+		cudaStream_t &stream,
+		cudaGraph_t &graph, 
+		cudaGraphExec_t &graphExec);
 __global__ void create_seq_gpu_kernel(INT_TYPE* key_array,
 		double seed,
 		double a,
@@ -277,7 +280,9 @@ __device__ double find_my_seed_device(INT_TYPE kn,
 		long nn,
 		double s,
 		double a);
-static void full_verify_gpu();
+static void full_verify_gpu(cudaStream_t &stream,
+		cudaGraph_t &graph, 
+		cudaGraphExec_t &graphExec);
 __global__ void full_verify_gpu_kernel_1(INT_TYPE* key_array,
 		INT_TYPE* key_buff2,
 		INT_TYPE number_of_blocks,
@@ -293,7 +298,7 @@ __global__ void full_verify_gpu_kernel_3(INT_TYPE* key_array,
 		INT_TYPE amount_of_work);
 __device__ double randlc_device(double* X,
 		double* A);
-static void rank_gpu(INT_TYPE iteration);
+static void rank_gpu(INT_TYPE iteration, cudaStream_t &stream);
 __global__ void rank_gpu_kernel_1(INT_TYPE* key_array,
 		INT_TYPE* partial_verify_vals,
 		INT_TYPE* test_index_array,
@@ -330,6 +335,10 @@ __global__ void rank_gpu_kernel_7(INT_TYPE* partial_verify_vals,
 		INT_TYPE amount_of_work);
 static void release_gpu();
 static void setup_gpu();
+
+cudaStream_t stream1;
+cudaGraph_t graph1, graph2, graph3, graph4, graph4_1, graph4_2, graph5;
+cudaGraphExec_t graphExec1, graphExec2, graphExec3, graphExec4, graphExec4_2, graphExec5;
 
 /* is */
 int main(int argc, char** argv){
@@ -395,7 +404,7 @@ int main(int argc, char** argv){
 #endif
 	/* generate random number sequence and subsequent keys on all procs */
 	create_seq_gpu(314159265.00, /* random number gen seed */
-			1220703125.00); /* random number gen mult */
+			1220703125.00, stream1, graph1, graphExec1); /* random number gen mult */
 #if defined(PROFILING)
 	timer_stop(PROFILING_CREATE);
 #endif
@@ -404,7 +413,24 @@ int main(int argc, char** argv){
 	 * do one interation for free (i.e., untimed) to guarantee initialization of  
 	 * all data and code pages and respective tables 
 	 */
-	rank_gpu(1);  
+	static bool graphCreated3 = false;
+	if (!graphCreated3){
+
+		cudaStreamCreate(&stream1);
+		cudaStreamBeginCapture(stream1, cudaStreamCaptureModeGlobal);
+
+		rank_gpu(1, stream1);
+
+		cudaStreamEndCapture(stream1, &graph3);
+		cudaGraphInstantiate(&graphExec3, graph3, NULL, NULL, 0);
+
+		graphCreated3 = true;
+	}
+
+if (graphCreated3){
+	cudaGraphLaunch(graphExec3, stream1);
+	cudaStreamSynchronize(stream1);	
+}		  
 
 	/* start verification counter */
 	passed_verification = 0;
@@ -418,11 +444,29 @@ int main(int argc, char** argv){
 #else
 	timer_start(PROFILING_TOTAL_TIME);
 #endif
-	/* this is the main iteration */
-	for(iteration=1; iteration<=MAX_ITERATIONS; iteration++){
-		if(CLASS != 'S')printf( "        %ld\n", (long)iteration);		
-		rank_gpu(iteration);
+
+	static bool graphCreated2 = false;
+	if (!graphCreated2){
+
+		cudaStreamCreate(&stream1);
+		cudaStreamBeginCapture(stream1, cudaStreamCaptureModeGlobal);
+		/* this is the main iteration */
+		for(iteration=1; iteration<=MAX_ITERATIONS; iteration++){
+			if(CLASS != 'S')printf( "        %ld\n", (long)iteration);		
+			rank_gpu(iteration, stream1);
+		}
+
+		cudaStreamEndCapture(stream1, &graph2);
+		cudaGraphInstantiate(&graphExec2, graph2, NULL, NULL, 0);
+
+		graphCreated2 = true;
 	}
+
+if (graphCreated2){
+	cudaGraphLaunch(graphExec2, stream1);
+	cudaStreamSynchronize(stream1);	
+}
+
 #if defined(PROFILING)
 	timer_stop(PROFILING_RANK);
 #else
@@ -438,7 +482,7 @@ int main(int argc, char** argv){
 #if defined(PROFILING)
 	timer_start(PROFILING_VERIFY);
 #endif
-	full_verify_gpu();
+	full_verify_gpu(stream1, graph4, graphExec4);
 #if defined(PROFILING)
 	timer_stop(PROFILING_VERIFY);
 #endif
@@ -505,14 +549,30 @@ int main(int argc, char** argv){
 	return 0;  
 }
 
-static void create_seq_gpu(double seed, double a){  
+static void create_seq_gpu(double seed, double a, cudaStream_t &stream, cudaGraph_t &graph, cudaGraphExec_t &graphExec){  
+	static bool graphCreated1 = false;
+
+	if (!graphCreated1) {
+
+	cudaStreamCreate(&stream);
+	cudaStreamBeginCapture(stream, cudaStreamCaptureModeGlobal);
+
 	create_seq_gpu_kernel<<<blocks_per_grid_on_create_seq, 
-		threads_per_block_on_create_seq>>>(key_array_device,
+		threads_per_block_on_create_seq, 0, stream>>>(key_array_device,
 				seed,
 				a,
 				blocks_per_grid_on_create_seq,
 				amount_of_work_on_create_seq);
-	cudaDeviceSynchronize();
+	cudaStreamEndCapture(stream, &graph);
+	cudaGraphInstantiate(&graphExec, graph, NULL, NULL, 0);
+
+	graphCreated1 = true;
+}				
+if (graphCreated1){
+	cudaGraphLaunch(graphExec, stream);
+	cudaStreamSynchronize(stream);
+	cudaDeviceSynchronize();	
+}
 }
 
 __global__ void create_seq_gpu_kernel(INT_TYPE* key_array,
@@ -580,14 +640,22 @@ __device__ double find_my_seed_device(INT_TYPE kn,
 	return(t1);
 }
 
-static void full_verify_gpu(){		
+static void full_verify_gpu(cudaStream_t &stream, cudaGraph_t &graph, cudaGraphExec_t &graphExec){		
+	static bool graphCreated4 = false;
+
 	INT_TYPE* memory_aux_device;
 	size_t size_memory_aux=sizeof(INT_TYPE)*(amount_of_work_on_full_verify_3/threads_per_block_on_full_verify_3);		
 	cudaMalloc(&memory_aux_device, size_memory_aux);	
 
+	if (!graphCreated4) {
+
+	cudaStreamCreate(&stream);
+
+	cudaStreamBeginCapture(stream, cudaStreamCaptureModeGlobal);
+
 	/* full_verify_gpu_kernel_1 */
 	full_verify_gpu_kernel_1<<<blocks_per_grid_on_full_verify_1, 
-		threads_per_block_on_full_verify_1>>>(key_array_device,
+		threads_per_block_on_full_verify_1, 0, stream>>>(key_array_device,
 				key_buff2_device,
 				blocks_per_grid_on_full_verify_1,
 				amount_of_work_on_full_verify_1);
@@ -595,7 +663,7 @@ static void full_verify_gpu(){
 
 	/* full_verify_gpu_kernel_2 */
 	full_verify_gpu_kernel_2<<<blocks_per_grid_on_full_verify_2, 
-		threads_per_block_on_full_verify_2>>>(key_buff2_device,
+		threads_per_block_on_full_verify_2, 0, stream>>>(key_buff2_device,
 				key_buff1_device,
 				key_array_device,
 				blocks_per_grid_on_full_verify_2,
@@ -605,11 +673,21 @@ static void full_verify_gpu(){
 	/* full_verify_gpu_kernel_3 */
 	full_verify_gpu_kernel_3<<<blocks_per_grid_on_full_verify_3, 
 		threads_per_block_on_full_verify_3,
-		size_shared_data_on_full_verify_3>>>(key_array_device,
+		size_shared_data_on_full_verify_3, stream>>>(key_array_device,
 				memory_aux_device,
 				blocks_per_grid_on_full_verify_3,
 				amount_of_work_on_full_verify_3);
 	cudaDeviceSynchronize();
+
+	cudaStreamEndCapture(stream, &graph);
+	cudaGraphInstantiate(&graphExec, graph, NULL, NULL, 0);
+
+	graphCreated4 = true;
+}
+if (graphCreated4){
+	cudaGraphLaunch(graphExec, stream);
+	cudaStreamSynchronize(stream);	
+}	
 
 	/* reduce on cpu */
 	INT_TYPE i, j = 0;
@@ -722,25 +800,26 @@ __device__ double randlc_device(double* X,
 	return(R46 * *X);
 } 
 
-static void rank_gpu(INT_TYPE iteration){
+static void rank_gpu(INT_TYPE iteration, cudaStream_t &stream){
+
 	/* rank_gpu_kernel_1 */
 	rank_gpu_kernel_1<<<blocks_per_grid_on_rank_1, 
-		threads_per_block_on_rank_1>>>(key_array_device,
+		threads_per_block_on_rank_1, 0, stream>>>(key_array_device,
 				partial_verify_vals_device,
 				index_array_device,
 				iteration,
 				blocks_per_grid_on_rank_1,
-				amount_of_work_on_rank_1);
+				amount_of_work_on_rank_1);			
 
 	/* rank_gpu_kernel_2 */
 	rank_gpu_kernel_2<<<blocks_per_grid_on_rank_2, 
-		threads_per_block_on_rank_2>>>(key_buff1_device,
+		threads_per_block_on_rank_2, 0, stream>>>(key_buff1_device,
 				blocks_per_grid_on_rank_2,
 				amount_of_work_on_rank_2);
 
 	/* rank_gpu_kernel_3 */
 	rank_gpu_kernel_3<<<blocks_per_grid_on_rank_3, 
-		threads_per_block_on_rank_3>>>(key_buff1_device,
+		threads_per_block_on_rank_3, 0, stream>>>(key_buff1_device,
 				key_array_device,
 				blocks_per_grid_on_rank_3,
 				amount_of_work_on_rank_3);
@@ -748,7 +827,7 @@ static void rank_gpu(INT_TYPE iteration){
 	/* rank_gpu_kernel_4 */
 	rank_gpu_kernel_4<<<blocks_per_grid_on_rank_4, 
 		threads_per_block_on_rank_4,
-		size_shared_data_on_rank_4>>>(key_buff1_device,
+		size_shared_data_on_rank_4, stream>>>(key_buff1_device,
 				key_buff1_device,
 				sum_device,
 				blocks_per_grid_on_rank_4,
@@ -757,14 +836,14 @@ static void rank_gpu(INT_TYPE iteration){
 	/* rank_gpu_kernel_5 */
 	rank_gpu_kernel_5<<<blocks_per_grid_on_rank_5, 
 		threads_per_block_on_rank_5,
-		size_shared_data_on_rank_5>>>(sum_device,
+		size_shared_data_on_rank_5, stream>>>(sum_device,
 				sum_device,
 				blocks_per_grid_on_rank_5,
 				amount_of_work_on_rank_5);
 
 	/* rank_gpu_kernel_6 */
 	rank_gpu_kernel_6<<<blocks_per_grid_on_rank_6, 
-		threads_per_block_on_rank_6>>>(key_buff1_device,
+		threads_per_block_on_rank_6, 0, stream>>>(key_buff1_device,
 				key_buff1_device,
 				sum_device,
 				blocks_per_grid_on_rank_6,
@@ -772,7 +851,7 @@ static void rank_gpu(INT_TYPE iteration){
 
 	/* rank_gpu_kernel_7 */
 	rank_gpu_kernel_7<<<blocks_per_grid_on_rank_7, 
-		threads_per_block_on_rank_7>>>(partial_verify_vals_device,
+		threads_per_block_on_rank_7, 0, stream>>>(partial_verify_vals_device,
 				key_buff1_device,
 				rank_array_device,
 				passed_verification_device,
@@ -1015,6 +1094,18 @@ static void release_gpu(){
 	cudaFree(passed_verification_device);
 	cudaFree(key_scan_device);
 	cudaFree(sum_device);
+
+	cudaStreamDestroy(stream1);	
+
+	cudaGraphDestroy(graph1);
+	cudaGraphDestroy(graph2);
+	cudaGraphDestroy(graph3);
+	cudaGraphDestroy(graph4);			
+
+	cudaGraphExecDestroy(graphExec1);	
+	cudaGraphExecDestroy(graphExec2);	
+	cudaGraphExecDestroy(graphExec3);	
+	cudaGraphExecDestroy(graphExec4);				
 }
 
 static void setup_gpu(){

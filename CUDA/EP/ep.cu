@@ -110,6 +110,8 @@ __device__ void vranlc_device(int n,
 		double a, 
 		double* y);
 
+
+
 /* ep */
 int main(int argc, char** argv){
 #if defined(DO_NOT_ALLOCATE_ARRAYS_WITH_DYNAMIC_MEMORY_AND_AS_SINGLE_DIMENSION)
@@ -123,7 +125,8 @@ int main(int argc, char** argv){
 	double sx_verify_value, sy_verify_value, sx_err, sy_err;
 	int i, j, nit, block;
 	boolean verified;
-	char size[16];
+	char size[16];	
+
 
 	/*
 	 * --------------------------------------------------------------------
@@ -162,18 +165,43 @@ int main(int argc, char** argv){
 	timer_clear(PROFILING_TOTAL_TIME);
 	timer_start(PROFILING_TOTAL_TIME);
 
-	gpu_kernel<<<blocks_per_grid, 
-		threads_per_block>>>(q_device,
-				sx_device,
-				sy_device,
-				an);
 
+	cudaStream_t stream1;
+	cudaGraph_t graph1;
+	cudaGraphExec_t graphExec1;
+	cudaStreamCreate(&stream1);	
+	bool graphCreated = false;	
+
+	if (!graphCreated) {
+
+	cudaStreamBeginCapture(stream1, cudaStreamCaptureModeGlobal);			
+	
+
+		gpu_kernel<<<blocks_per_grid, 
+			threads_per_block,0, stream1>>>(q_device,
+					sx_device,
+					sy_device,
+					an);	
+
+		cudaMemcpyAsync(q_host, q_device, size_q, cudaMemcpyDeviceToHost, stream1);
+		cudaMemcpyAsync(sx_host, sx_device, size_sx, cudaMemcpyDeviceToHost, stream1);
+		cudaMemcpyAsync(sy_host, sy_device, size_sy, cudaMemcpyDeviceToHost, stream1);				
+
+		cudaStreamEndCapture(stream1, &graph1);
+		cudaGraphInstantiate(&graphExec1, graph1, NULL, NULL, 0);
+		graphCreated = true;
+
+	}
+
+	if (graphCreated) {
+		cudaGraphLaunch(graphExec1, stream1);
+		cudaStreamSynchronize(stream1);	
+	}	
+	
+					
 	timer_stop(PROFILING_TOTAL_TIME);
-	tm = timer_read(PROFILING_TOTAL_TIME);		
-
-	cudaMemcpy(q_host, q_device, size_q, cudaMemcpyDeviceToHost);
-	cudaMemcpy(sx_host, sx_device, size_sx, cudaMemcpyDeviceToHost);
-	cudaMemcpy(sy_host, sy_device, size_sy, cudaMemcpyDeviceToHost);
+	tm = timer_read(PROFILING_TOTAL_TIME);	
+	
 
 	for(block=0; block<blocks_per_grid; block++){
 		for(i=0; i<NQ; i++){
@@ -269,6 +297,9 @@ int main(int argc, char** argv){
 			(char*)CS7);	
 
 	release_gpu();
+	cudaStreamDestroy(stream1);	
+	cudaGraphExecDestroy(graphExec1);
+	cudaGraphDestroy(graph1);	
 
 	return 0;
 }

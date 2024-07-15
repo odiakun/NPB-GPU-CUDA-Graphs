@@ -364,8 +364,8 @@ static void zran3(void* pointer_z,
 
 
 cudaStream_t stream1;
-cudaGraph_t graph1, graph2, graph3, graph4, graph4_1, graph4_2, graph5;
-cudaGraphExec_t graphExec1, graphExec2, graphExec3, graphExec4, graphExec4_2, graphExec5;		
+cudaGraph_t graph1, graph2, graph3;
+cudaGraphExec_t graphExec1, graphExec2, graphExec3;	
 
 /* mg */
 int main(int argc, char** argv){
@@ -1614,6 +1614,16 @@ static void release_gpu(){
 	cudaFree(u_device);
 	cudaFree(v_device);
 	cudaFree(r_device);
+
+	cudaStreamDestroy(stream1);	
+
+	cudaGraphDestroy(graph1);
+	cudaGraphDestroy(graph2);
+	cudaGraphDestroy(graph3);			
+
+	cudaGraphExecDestroy(graphExec1);	
+	cudaGraphExecDestroy(graphExec2);	
+	cudaGraphExecDestroy(graphExec3);		
 }
 
 /*

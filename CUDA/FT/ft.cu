@@ -227,7 +227,8 @@ static void cffts1_gpu(const int is,
 		dcomplex x_in[], 
 		dcomplex x_out[], 
 		dcomplex y0[], 
-		dcomplex y1[]);
+		dcomplex y1[],
+		cudaStream_t &stream);
 __global__ void cffts1_gpu_kernel_1(dcomplex x_in[], 
 		dcomplex y0[]);
 __global__ void cffts1_gpu_kernel_2(const int is, 
@@ -241,7 +242,8 @@ static void cffts2_gpu(int is,
 		dcomplex x_in[], 
 		dcomplex x_out[], 
 		dcomplex y0[], 
-		dcomplex y1[]);
+		dcomplex y1[],
+		cudaStream_t &stream);
 __global__ void cffts2_gpu_kernel_1(dcomplex x_in[], 
 		dcomplex y0[]);
 __global__ void cffts2_gpu_kernel_2(const int is, 
@@ -255,7 +257,8 @@ static void cffts3_gpu(int is,
 		dcomplex x_in[], 
 		dcomplex x_out[], 
 		dcomplex y0[], 
-		dcomplex y1[]);
+		dcomplex y1[],
+		cudaStream_t &stream);
 __device__ void cffts3_gpu_cfftz_device(const int is, 
 		int m, 
 		int n, 
@@ -286,26 +289,28 @@ static void checksum_gpu(int iteration,
 __global__ void checksum_gpu_kernel(int iteration, 
 		dcomplex u1[], 
 		dcomplex sums[]);
-static void compute_indexmap_gpu(double twiddle[]);
+static void compute_indexmap_gpu(double twiddle[],cudaStream_t &stream, cudaGraph_t &graph, cudaGraphExec_t &graphExec );
 __global__ void compute_indexmap_gpu_kernel(double twiddle[]);
-static void compute_initial_conditions_gpu(dcomplex u0[]);
+static void compute_initial_conditions_gpu(dcomplex u0[], cudaStream_t &stream, cudaGraph_t &graph, cudaGraphExec_t &graphExec);
 __global__ void compute_initial_conditions_gpu_kernel(dcomplex u0[], 
 		double starts[]);
 static void evolve_gpu(dcomplex u0[], 
 		dcomplex u1[], 
-		double twiddle[]);
+		double twiddle[], cudaStream_t &stream, cudaGraph_t &graph, cudaGraphExec_t &graphExec);
 __global__ void evolve_gpu_kernel(dcomplex u0[], 
 		dcomplex u1[], 
 		double twiddle[]);
 static void fft_gpu(int dir,
 		dcomplex x1[],
-		dcomplex x2[]);
+		dcomplex x2[],
+		cudaStream_t &stream);
 static void fft_init_gpu(int n);
 static int ilog2(int n);
 __device__ int ilog2_device(int n);
 static void init_ui_gpu(dcomplex u0[],
 		dcomplex u1[],
-		double twiddle[]);
+		double twiddle[],
+		cudaStream_t &stream, cudaGraph_t &graph, cudaGraphExec_t &graphExec);
 __global__ void init_ui_gpu_kernel(dcomplex u0[],
 		dcomplex u1[],
 		double twiddle[]);
@@ -331,6 +336,11 @@ __device__ void vranlc_device(int n,
 		double a, 
 		double y[]);
 
+cudaStream_t stream1;
+cudaGraph_t graph1, graph2, graph3, graph4, graph5, graph6;
+cudaGraphExec_t graphExec1, graphExec2, graphExec3, graphExec4, graphExec5, graphExec6;
+
+
 /* ft */
 int main(int argc, char** argv){
 #if defined(DO_NOT_ALLOCATE_ARRAYS_WITH_DYNAMIC_MEMORY_AND_AS_SINGLE_DIMENSION)
@@ -344,6 +354,7 @@ int main(int argc, char** argv){
 	boolean verified;
 	char class_npb;	
 
+
 	/*
 	 * ---------------------------------------------------------------------
 	 * run the entire problem once to make sure all data is touched. 
@@ -353,18 +364,47 @@ int main(int argc, char** argv){
 	 */	
 	setup();
 	setup_gpu();
-	init_ui_gpu(u0_device, u1_device, twiddle_device);
-#pragma omp parallel
-	{
-		if(omp_get_thread_num()==TASK_INDEXMAP){
-			compute_indexmap_gpu(twiddle_device);
-		}else if(omp_get_thread_num()==TASK_INITIAL_CONDITIONS){
-			compute_initial_conditions_gpu(u1_device);
-		}else if(omp_get_thread_num()==TASK_INIT_UI){
-			fft_init_gpu(MAXDIM);
-		}		
-	}cudaDeviceSynchronize();
-	fft_gpu(1, u1_device, u0_device);
+	init_ui_gpu(u0_device, u1_device, twiddle_device, stream1, graph1, graphExec1);
+
+
+	/*
+	*-----------------------------------------------------------------------
+	* below commented out during debugging
+	*-----------------------------------------------------------------------
+	*/
+
+// #pragma omp parallel
+// 	{
+// 		if(omp_get_thread_num()==TASK_INDEXMAP){
+// 			compute_indexmap_gpu(twiddle_device, stream1, graph2, graphExec2);
+// 		}else if(omp_get_thread_num()==TASK_INITIAL_CONDITIONS){
+// 			compute_initial_conditions_gpu(u1_device, stream1, graph3, graphExec3);
+// 		}else if(omp_get_thread_num()==TASK_INIT_UI){
+// 			fft_init_gpu(MAXDIM);
+// 		}		
+// 	}cudaDeviceSynchronize();
+
+// 	static bool graphCreated4 = false;
+// 	if (!graphCreated4) {
+
+
+// 	cudaStreamBeginCapture(stream1, cudaStreamCaptureModeGlobal);
+
+// 	fft_gpu(1, u1_device, u0_device, stream1);
+
+// 	cudaStreamEndCapture(stream1, &graph4);
+// 	cudaGraphInstantiate(&graphExec4, graph4, NULL, NULL, 0);
+
+// 	graphCreated4 = true;
+// }
+
+// if (graphCreated4){
+// 	cudaGraphLaunch(graphExec4, stream1);
+// 	cudaStreamSynchronize(stream1);
+// 	cudaDeviceSynchronize();
+// 	// cudaStreamDestroy(stream1);
+// 	// cudaStreamCreate(&stream1);
+// }	
 
 	/*
 	 * ---------------------------------------------------------------------
@@ -394,19 +434,68 @@ int main(int argc, char** argv){
 #pragma omp parallel
 	{
 		if(omp_get_thread_num()==TASK_INDEXMAP){
-			compute_indexmap_gpu(twiddle_device);
+			compute_indexmap_gpu(twiddle_device, stream1, graph2, graphExec2);
 		}else if(omp_get_thread_num()==TASK_INITIAL_CONDITIONS){
-			compute_initial_conditions_gpu(u1_device);
+			compute_initial_conditions_gpu(u1_device, stream1, graph3, graphExec3);
 		}else if(omp_get_thread_num()==TASK_INIT_UI){
 			fft_init_gpu(MAXDIM);
 		}		
-	}cudaDeviceSynchronize();
-	fft_gpu(1, u1_device, u0_device);
-	for(iter=1; iter<=niter; iter++){
-		evolve_gpu(u0_device, u1_device, twiddle_device);
-		fft_gpu(-1, u1_device, u1_device);
-		checksum_gpu(iter, u1_device);
 	}
+	cudaDeviceSynchronize();
+
+	static bool graphCreated4 = false;
+	if (!graphCreated4) {
+
+	cudaStreamBeginCapture(stream1, cudaStreamCaptureModeGlobal);
+
+	fft_gpu(1, u1_device, u0_device, stream1);
+
+	cudaStreamEndCapture(stream1, &graph4);
+	cudaGraphInstantiate(&graphExec4, graph4, NULL, NULL, 0);
+
+	graphCreated4 = true;
+}
+
+if (graphCreated4){
+	cudaGraphLaunch(graphExec4, stream1);
+	cudaStreamSynchronize(stream1);
+	cudaDeviceSynchronize();
+}	
+
+	
+
+	for(iter=1; iter<=niter; iter++){
+
+			evolve_gpu(u0_device, u1_device, twiddle_device, stream1, graph5, graphExec5);
+
+			cffts3_gpu(-1, u_device, u1_device, u1_device, y0_device, y1_device, stream1);
+			cffts2_gpu(-1, u_device, u1_device, u1_device, y0_device, y1_device, stream1);
+			cffts1_gpu(-1, u_device, u1_device, u1_device, y0_device, y1_device, stream1);	
+
+		if (iter==1) {
+			// cudaStreamCreate(&stream1);
+			cudaStreamBeginCapture(stream1, cudaStreamCaptureModeGlobal);
+
+			// fft_gpu(-1, u1_device, u1_device, stream1);
+
+
+
+			cudaStreamEndCapture(stream1, &graph6);
+			cudaGraphInstantiate(&graphExec6, graph6, NULL, NULL, 0);
+		}
+	
+
+	cudaGraphLaunch(graphExec6, stream1);
+	cudaStreamSynchronize(stream1);
+	cudaDeviceSynchronize();
+
+	checksum_gpu(iter, u1_device);
+
+	cudaStreamSynchronize(stream1);
+	cudaDeviceSynchronize();			
+	}
+
+	
 
 	cudaMemcpy(sums, sums_device, size_sums_device, cudaMemcpyDeviceToHost);
 	for(iter=1; iter<=niter; iter++){
@@ -528,14 +617,19 @@ static void cffts1_gpu(const int is,
 		dcomplex x_in[], 
 		dcomplex x_out[], 
 		dcomplex y0[], 
-		dcomplex y1[]){
+		dcomplex y1[],
+		cudaStream_t &stream){
+
+
 #if defined(PROFILING)
 	timer_start(PROFILING_FFTX_1);
 #endif
+
 	cffts1_gpu_kernel_1<<<blocks_per_grid_on_fftx_1,
-		threads_per_block_on_fftx_1>>>(x_in, 
+		threads_per_block_on_fftx_1, 0, stream>>>(x_in, 
 				y0);
-	cudaDeviceSynchronize();
+	// cudaDeviceSynchronize();
+	cudaStreamSynchronize(stream);
 #if defined(PROFILING)
 	timer_stop(PROFILING_FFTX_1);
 #endif
@@ -544,11 +638,12 @@ static void cffts1_gpu(const int is,
 	timer_start(PROFILING_FFTX_2);
 #endif
 	cffts1_gpu_kernel_2<<<blocks_per_grid_on_fftx_2,
-		threads_per_block_on_fftx_2>>>(is, 
+		threads_per_block_on_fftx_2, 0, stream>>>(is, 
 				y0, 
 				y1, 
 				u);
-	cudaDeviceSynchronize();
+	// cudaDeviceSynchronize();
+	cudaStreamSynchronize(stream);
 #if defined(PROFILING)
 	timer_stop(PROFILING_FFTX_2);
 #endif
@@ -557,9 +652,12 @@ static void cffts1_gpu(const int is,
 	timer_start(PROFILING_FFTX_3);
 #endif
 	cffts1_gpu_kernel_3<<<blocks_per_grid_on_fftx_3,
-		threads_per_block_on_fftx_3>>>(x_out, 
+		threads_per_block_on_fftx_3, 0, stream>>>(x_out, 
 				y0);
-	cudaDeviceSynchronize();
+
+	// cudaDeviceSynchronize();
+	cudaStreamSynchronize(stream);	
+
 #if defined(PROFILING)
 	timer_stop(PROFILING_FFTX_3);
 #endif
@@ -723,14 +821,16 @@ static void cffts2_gpu(int is,
 		dcomplex x_in[], 
 		dcomplex x_out[], 
 		dcomplex y0[], 
-		dcomplex y1[]){
+		dcomplex y1[],
+		cudaStream_t &stream){
 #if defined(PROFILING)
 	timer_start(PROFILING_FFTY_1);
 #endif
 	cffts2_gpu_kernel_1<<<blocks_per_grid_on_ffty_1,
-		threads_per_block_on_ffty_1>>>(x_in, 
+		threads_per_block_on_ffty_1, 0, stream>>>(x_in, 
 				y0);
-	cudaDeviceSynchronize();
+	// cudaDeviceSynchronize();
+	cudaStreamSynchronize(stream);	
 #if defined(PROFILING)
 	timer_stop(PROFILING_FFTY_1);
 #endif
@@ -739,11 +839,12 @@ static void cffts2_gpu(int is,
 	timer_start(PROFILING_FFTY_2);
 #endif
 	cffts2_gpu_kernel_2<<<blocks_per_grid_on_ffty_2,
-		threads_per_block_on_ffty_2>>>(is, 
+		threads_per_block_on_ffty_2, 0, stream>>>(is, 
 				y0, 
 				y1, 
 				u);
-	cudaDeviceSynchronize();
+	// cudaDeviceSynchronize();
+	cudaStreamSynchronize(stream);	
 #if defined(PROFILING)
 	timer_stop(PROFILING_FFTY_2);
 #endif
@@ -752,9 +853,10 @@ static void cffts2_gpu(int is,
 	timer_start(PROFILING_FFTY_3);
 #endif
 	cffts2_gpu_kernel_3<<<blocks_per_grid_on_ffty_3,
-		threads_per_block_on_ffty_3>>>(x_out, 
+		threads_per_block_on_ffty_3, 0, stream>>>(x_out, 
 				y0);
-	cudaDeviceSynchronize();
+	// cudaDeviceSynchronize();
+	cudaStreamSynchronize(stream);	
 #if defined(PROFILING)
 	timer_stop(PROFILING_FFTY_3);
 #endif
@@ -914,14 +1016,16 @@ static void cffts3_gpu(int is,
 		dcomplex x_in[], 
 		dcomplex x_out[], 
 		dcomplex y0[], 
-		dcomplex y1[]){
+		dcomplex y1[],
+		cudaStream_t &stream){
 #if defined(PROFILING)
 	timer_start(PROFILING_FFTZ_1);
 #endif
 	cffts3_gpu_kernel_1<<<blocks_per_grid_on_fftz_1,
-		threads_per_block_on_fftz_1>>>(x_in, 
+		threads_per_block_on_fftz_1, 0, stream>>>(x_in, 
 				y0);
-	cudaDeviceSynchronize();
+	// cudaDeviceSynchronize();
+	cudaStreamSynchronize(stream);	
 #if defined(PROFILING)
 	timer_stop(PROFILING_FFTZ_1);
 #endif
@@ -930,11 +1034,12 @@ static void cffts3_gpu(int is,
 	timer_start(PROFILING_FFTZ_2);
 #endif
 	cffts3_gpu_kernel_2<<<blocks_per_grid_on_fftz_2,
-		threads_per_block_on_fftz_2>>>(is, 
+		threads_per_block_on_fftz_2, 0, stream>>>(is, 
 				y0, 
 				y1, 
 				u);
-	cudaDeviceSynchronize();
+	// cudaDeviceSynchronize();
+	cudaStreamSynchronize(stream);	
 #if defined(PROFILING)
 	timer_stop(PROFILING_FFTZ_2);
 #endif
@@ -943,9 +1048,10 @@ static void cffts3_gpu(int is,
 	timer_start(PROFILING_FFTZ_3);
 #endif
 	cffts3_gpu_kernel_3<<<blocks_per_grid_on_fftz_3,
-		threads_per_block_on_fftz_3>>>(x_out, 
+		threads_per_block_on_fftz_3, 0, stream>>>(x_out, 
 				y0);
-	cudaDeviceSynchronize();
+	// cudaDeviceSynchronize();
+	cudaStreamSynchronize(stream);	
 #if defined(PROFILING)
 	timer_stop(PROFILING_FFTZ_3);
 #endif	
@@ -1108,14 +1214,34 @@ __global__ void cffts3_gpu_kernel_3(dcomplex x_out[],
 
 static void checksum_gpu(int iteration,
 		dcomplex u1[]){
+
+// static bool graphCreated6 = false;
+
 #if defined(PROFILING)
 	timer_start(PROFILING_CHECKSUM);
 #endif
+
+// if (!graphCreated6) {
+
+// 	cudaStreamCreate(&stream);
+// 	cudaStreamBeginCapture(stream, cudaStreamCaptureModeGlobal);
+
 	checksum_gpu_kernel<<<blocks_per_grid_on_checksum,
 		threads_per_block_on_checksum,
 		size_shared_data>>>(iteration, 
 				u1, 
 				sums_device);
+
+// 	cudaStreamEndCapture(stream, &graph);
+// 	cudaGraphInstantiate(&graphExec, graph, NULL, NULL, 0);
+
+// 	graphCreated6 = true;
+// }
+
+// if (graphCreated6){
+// 	cudaGraphLaunch(graphExec, stream);
+// 	cudaStreamSynchronize(stream);
+// }					
 #if defined(PROFILING)
 	timer_stop(PROFILING_CHECKSUM);
 #endif
@@ -1152,12 +1278,33 @@ __global__ void checksum_gpu_kernel(int iteration,
 	}
 }
 
-static void compute_indexmap_gpu(double twiddle[]){
+static void compute_indexmap_gpu(double twiddle[], cudaStream_t &stream, cudaGraph_t &graph, cudaGraphExec_t &graphExec){
+	static bool graphCreated2 = false;
+
 #if defined(PROFILING)
 	timer_start(PROFILING_INDEXMAP);
 #endif
+
+if (!graphCreated2) {
+
+	// cudaStreamCreate(&stream);
+	cudaStreamBeginCapture(stream, cudaStreamCaptureModeGlobal);
+
 	compute_indexmap_gpu_kernel<<<blocks_per_grid_on_compute_indexmap,
-		threads_per_block_on_compute_indexmap>>>(twiddle);
+		threads_per_block_on_compute_indexmap, 0, stream>>>(twiddle);
+
+	cudaStreamEndCapture(stream, &graph);
+	cudaGraphInstantiate(&graphExec, graph, NULL, NULL, 0);
+
+	graphCreated2 = true;
+}
+
+if (graphCreated2){
+	cudaGraphLaunch(graphExec, stream);
+	cudaStreamSynchronize(stream);
+	cudaDeviceSynchronize();
+}	
+
 #if defined(PROFILING)
 	timer_stop(PROFILING_INDEXMAP);
 #endif
@@ -1185,7 +1332,9 @@ __global__ void compute_indexmap_gpu_kernel(double twiddle[]){
 	twiddle[thread_id] = exp(AP*(double)(ii*ii+kj2));
 }
 
-static void compute_initial_conditions_gpu(dcomplex u0[]){  
+static void compute_initial_conditions_gpu(dcomplex u0[], cudaStream_t &stream, cudaGraph_t &graph, cudaGraphExec_t &graphExec){  
+	static bool graphCreated3 = false;
+
 #if defined(PROFILING)
 	timer_start(PROFILING_INITIAL_CONDITIONS);
 #endif  
@@ -1206,9 +1355,28 @@ static void compute_initial_conditions_gpu(dcomplex u0[]){
 
 	cudaMemcpy(starts_device, starts, size_starts_device, cudaMemcpyHostToDevice);
 
+if (!graphCreated3) {
+
+	cudaStreamCreate(&stream);
+	cudaStreamBeginCapture(stream, cudaStreamCaptureModeGlobal);
+
 	compute_initial_conditions_gpu_kernel<<<blocks_per_grid_on_compute_initial_conditions,
-		threads_per_block_on_compute_initial_conditions>>>(u0, 
+		threads_per_block_on_compute_initial_conditions, 0, stream>>>(u0, 
 				starts_device);
+
+
+	cudaStreamEndCapture(stream, &graph);
+	cudaGraphInstantiate(&graphExec, graph, NULL, NULL, 0);
+
+	graphCreated3 = true;
+}
+
+if (graphCreated3){
+	cudaGraphLaunch(graphExec, stream);
+	cudaStreamSynchronize(stream);
+	cudaDeviceSynchronize();
+}	
+
 #if defined(PROFILING)
 	timer_stop(PROFILING_INITIAL_CONDITIONS);
 #endif  
@@ -1228,15 +1396,36 @@ __global__ void compute_initial_conditions_gpu_kernel(dcomplex u0[],
 
 static void evolve_gpu(dcomplex u0[], 
 		dcomplex u1[],
-		double twiddle[]){
+		double twiddle[], cudaStream_t &stream, cudaGraph_t &graph, cudaGraphExec_t &graphExec){
+
+		static bool graphCreated5 = false;
+
 #if defined(PROFILING)
 	timer_start(PROFILING_EVOLVE);
 #endif  
+
+if (!graphCreated5) {
+
+	// cudaStreamCreate(&stream);
+	cudaStreamBeginCapture(stream, cudaStreamCaptureModeGlobal);
+
 	evolve_gpu_kernel<<<blocks_per_grid_on_evolve,
-		threads_per_block_on_evolve>>>(u0, 
+		threads_per_block_on_evolve, 0, stream>>>(u0, 
 				u1,
 				twiddle);
-	cudaDeviceSynchronize();
+
+	cudaStreamEndCapture(stream, &graph);
+	cudaGraphInstantiate(&graphExec, graph, NULL, NULL, 0);
+
+	graphCreated5 = true;
+}
+
+if (graphCreated5){
+	cudaGraphLaunch(graphExec, stream);
+	cudaStreamSynchronize(stream);
+	cudaDeviceSynchronize();	
+}				
+
 #if defined(PROFILING)
 	timer_stop(PROFILING_EVOLVE);
 #endif  
@@ -1257,7 +1446,10 @@ __global__ void evolve_gpu_kernel(dcomplex u0[],
 
 static void fft_gpu(int dir,
 		dcomplex x1[],
-		dcomplex x2[]){
+		dcomplex x2[],
+		cudaStream_t &stream){
+		
+
 	/*
 	 * ---------------------------------------------------------------------
 	 * note: args x1, x2 must be different arrays
@@ -1266,15 +1458,29 @@ static void fft_gpu(int dir,
 	 * if they are
 	 * ---------------------------------------------------------------------
 	 */
+			
 	if(dir==1){
-		cffts1_gpu(1, u_device, x1, x1, y0_device, y1_device);
-		cffts2_gpu(1, u_device, x1, x1, y0_device, y1_device);
-		cffts3_gpu(1, u_device, x1, x2, y0_device, y1_device);
+		cffts1_gpu(1, u_device, x1, x1, y0_device, y1_device, stream);
+		cffts2_gpu(1, u_device, x1, x1, y0_device, y1_device, stream);
+		cffts3_gpu(1, u_device, x1, x2, y0_device, y1_device, stream);
 	}else{
-		cffts3_gpu(-1, u_device, x1, x1, y0_device, y1_device);
-		cffts2_gpu(-1, u_device, x1, x1, y0_device, y1_device);
-		cffts1_gpu(-1, u_device, x1, x2, y0_device, y1_device);
-	}
+		cffts3_gpu(-1, u_device, x1, x1, y0_device, y1_device, stream);
+		cffts2_gpu(-1, u_device, x1, x1, y0_device, y1_device, stream);
+		cffts1_gpu(-1, u_device, x1, x2, y0_device, y1_device, stream);
+	}	
+
+	cudaStreamSynchronize(stream);
+// 	cudaStreamEndCapture(stream, &graph);
+// 	cudaGraphInstantiate(&graphExec, graph, NULL, NULL, 0);
+
+// 	graphCreated4 = true;
+// }
+
+// if (graphCreated4){
+// 	cudaGraphLaunch(graphExec, stream);
+
+// }	
+
 }
 
 static void fft_init_gpu(int n){
@@ -1338,15 +1544,36 @@ __device__ int ilog2_device(int n){
 
 static void init_ui_gpu(dcomplex u0[],
 		dcomplex u1[],
-		double twiddle[]){
+		double twiddle[],
+		cudaStream_t &stream, cudaGraph_t &graph, cudaGraphExec_t &graphExec){
+
+	static bool graphCreated1 = false;
+
 #if defined(PROFILING)
 	timer_start(PROFILING_INIT_UI);
 #endif  
+
+if (!graphCreated1) {
+	cudaStreamCreate(&stream);
+	cudaStreamBeginCapture(stream, cudaStreamCaptureModeGlobal);
+
 	init_ui_gpu_kernel<<<blocks_per_grid_on_init_ui,
-		threads_per_block_on_init_ui>>>(u0, 
+		threads_per_block_on_init_ui, 0, stream>>>(u0, 
 				u1,
 				twiddle);
-	cudaDeviceSynchronize();
+
+	cudaStreamEndCapture(stream, &graph);
+	cudaGraphInstantiate(&graphExec, graph, NULL, NULL, 0);
+
+	graphCreated1 = true;
+}
+
+if (graphCreated1){
+	cudaGraphLaunch(graphExec, stream);
+	cudaStreamSynchronize(stream);
+	cudaDeviceSynchronize();	
+}					
+
 #if defined(PROFILING)
 	timer_stop(PROFILING_INIT_UI);
 #endif  
@@ -1455,6 +1682,22 @@ static void release_gpu(){
 	cudaFree(u1_device);
 	cudaFree(y0_device);
 	cudaFree(y1_device);
+
+	cudaStreamDestroy(stream1);	
+
+	cudaGraphDestroy(graph1);
+	cudaGraphDestroy(graph2);
+	cudaGraphDestroy(graph3);	
+	cudaGraphDestroy(graph4);
+	cudaGraphDestroy(graph5);				
+	cudaGraphDestroy(graph6);				
+
+	cudaGraphExecDestroy(graphExec1);	
+	cudaGraphExecDestroy(graphExec2);	
+	cudaGraphExecDestroy(graphExec3);	
+	cudaGraphExecDestroy(graphExec4);
+	cudaGraphExecDestroy(graphExec5);			
+	cudaGraphExecDestroy(graphExec6);			
 }
 
 static void setup(){
